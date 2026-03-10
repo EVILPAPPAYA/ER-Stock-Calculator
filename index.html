@@ -252,12 +252,24 @@ function App() {
   const [city,setCity]=useState("BLR");
   const [targetDays,setTargetDays]=useState(12);
   const [rows,setRows]=useState(()=>FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));
+  // Store inventory qty separately per city so switching city swaps the right qtys
+  const [invByCity,setInvByCity]=useState({BLR:{},KOL:{},DEL:{}});
   const [invMapper,setInvMapper]=useState(null);
   const [demandModal,setDemandModal]=useState(null);
   const [toast,setToast]=useState(null);
   const [fillLog,setFillLog]=useState({inv:[],demand:[]});
   const invRef=useRef(), soRef=useRef();
   const cityConf=CITIES[city];
+
+  // When city changes, swap in that city's inventory qtys (keep demand as-is)
+  const switchCity=useCallback((newCity)=>{
+    setCity(newCity);
+    setRows(prev=>prev.map(r=>({
+      ...r,
+      qty: invByCity[newCity][r.flavour] ?? 0,
+    })));
+    setFillLog(p=>({...p, inv: Object.keys(invByCity[newCity]).length ? Object.keys(invByCity[newCity]) : []}));
+  },[invByCity]);
 
   const showToast=(msg,color=K.green)=>{setToast({msg,color});setTimeout(()=>setToast(null),3000);};
 
@@ -306,11 +318,30 @@ function App() {
           updates[short]=(updates[short]||0)+(parseInt(row[qtyCol])||0);
           if(!log.includes(short)) log.push(short);
         }
-        if(!log.length) return showToast("No ER rows found for "+CITIES[targetCity].label,K.red);
+        // Build per-city inventory from ALL ER rows in the file
+        const allCityInv={BLR:{},KOL:{},DEL:{}};
+        const cityFacMap={BLR:"erbangalore",KOL:"erkolkata",DEL:"erdelhi"};
+        for(const row of cleanRows){
+          const fac=(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");
+          const matchedCity=Object.keys(cityFacMap).find(c=>cityFacMap[c]===fac);
+          if(!matchedCity) continue;
+          const short=matchFlavour(row[nameCol]);
+          if(!short) continue;
+          allCityInv[matchedCity][short]=(allCityInv[matchedCity][short]||0)+(parseInt(row[qtyCol])||0);
+        }
+        const filledCities=Object.keys(allCityInv).filter(c=>Object.keys(allCityInv[c]).length>0);
+        if(!filledCities.length) return showToast("No ER rows found in file",K.red);
+        // Save all cities
+        setInvByCity(allCityInv);
+        // Determine which city to show — prefer detected, else keep current
+        const activeCity=detectedCity||city;
         if(detectedCity && detectedCity!==city) setCity(detectedCity);
-        setRows(prev=>prev.map(r=>updates[r.flavour]!==undefined?{...r,qty:updates[r.flavour]}:r));
-        setFillLog(p=>({...p,inv:log}));
-        showToast(`✓ Qty filled — ${log.length} flavours (${CITIES[targetCity].label})`,K.red);
+        const activeInv=allCityInv[activeCity];
+        const activeLog=Object.keys(activeInv);
+        setRows(prev=>prev.map(r=>({...r, qty: activeInv[r.flavour]??0})));
+        setFillLog(p=>({...p,inv:activeLog}));
+        const cityLabels=filledCities.map(c=>CITIES[c].label).join(", ");
+        showToast(`✓ Loaded inventory for: ${cityLabels}`,K.red);
         return;
       }
       // Unknown format — show mapper
@@ -377,7 +408,7 @@ function App() {
   const totalSend=calc.reduce((s,r)=>s+r.send,0);
   const critical=calc.filter(r=>r.demand>0&&r.lat<3).length;
   const updateRow=(idx,field,val)=>setRows(prev=>prev.map((r,i)=>i===idx?{...r,[field]:val}:r));
-  const reset=()=>{setRows(FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));setFillLog({inv:[],demand:[]});};
+  const reset=()=>{setRows(FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));setFillLog({inv:[],demand:[]});setInvByCity({BLR:{},KOL:{},DEL:{}});};
 
   const exportCSV=()=>{
     const hdr=["Flavour","Full Name","Qty","Daily Demand",`After ${cityConf.transit}D Transit`,"Life After Transit","To Send","After Send","Est Life After Send"];
@@ -484,7 +515,7 @@ function App() {
               fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",fontWeight:600}}>City</div>
             <div style={{display:"flex",gap:8}}>
               {Object.entries(CITIES).map(([key,cfg])=>(
-                <button key={key} onClick={()=>setCity(key)} style={{padding:"9px 18px",borderRadius:6,cursor:"pointer",
+                <button key={key} onClick={()=>switchCity(key)} style={{padding:"9px 18px",borderRadius:6,cursor:"pointer",
                   border:`2px solid ${city===key?K.red:K.bdr}`,
                   background:city===key?K.redDim2:"transparent",
                   color:city===key?K.red:K.t2,
