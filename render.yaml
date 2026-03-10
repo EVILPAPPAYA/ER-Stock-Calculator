@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: er-stock-calculator
+    runtime: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars: []
