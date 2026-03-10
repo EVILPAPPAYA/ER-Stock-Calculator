@@ -81,14 +81,20 @@ function matchFlavour(val) {
   return score>0?best:null;
 }
 
-function parseDate(str) {
-  if(!str) return null;
-  const s=String(str).trim();
+function parseDate(val) {
+  if(!val) return null;
+  // Already a JS Date object (XLSX parses date cells automatically)
+  if(val instanceof Date) return isNaN(val.getTime()) ? null : val;
+  const s=String(val).trim();
+  // ISO: 2026-02-28 or 2026-02-28T13:36:42 or 2026-02-28 13:36:42
   const iso=s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if(iso) return new Date(iso[0]);
-  const dmy=s.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
-  if(dmy) return new Date(`${dmy[3]}-${dmy[2]}-${dmy[1]}`);
-  return null;
+  if(iso) return new Date(iso[1]+"-"+iso[2]+"-"+iso[3]);
+  // dd/mm/yyyy or dd/mm/yyyy hh:mm:ss
+  const dmy=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if(dmy) return new Date(dmy[3]+"-"+dmy[2].padStart(2,"0")+"-"+dmy[1].padStart(2,"0"));
+  // Try native parse as last resort
+  const d=new Date(s);
+  return isNaN(d.getTime()) ? null : d;
 }
 
 function parseFile(file) {
@@ -252,12 +258,24 @@ function App() {
   const [city,setCity]=useState("BLR");
   const [targetDays,setTargetDays]=useState(12);
   const [rows,setRows]=useState(()=>FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));
+  // Store inventory qty separately per city so switching city swaps the right qtys
+  const [invByCity,setInvByCity]=useState({BLR:{},KOL:{},DEL:{}});
   const [invMapper,setInvMapper]=useState(null);
   const [demandModal,setDemandModal]=useState(null);
   const [toast,setToast]=useState(null);
   const [fillLog,setFillLog]=useState({inv:[],demand:[]});
   const invRef=useRef(), soRef=useRef();
   const cityConf=CITIES[city];
+
+  // When city changes, swap in that city's inventory qtys (keep demand as-is)
+  const switchCity=useCallback((newCity)=>{
+    setCity(newCity);
+    setRows(prev=>prev.map(r=>({
+      ...r,
+      qty: invByCity[newCity][r.flavour] ?? 0,
+    })));
+    setFillLog(p=>({...p, inv: Object.keys(invByCity[newCity]).length ? Object.keys(invByCity[newCity]) : []}));
+  },[invByCity]);
 
   const showToast=(msg,color=K.green)=>{setToast({msg,color});setTimeout(()=>setToast(null),3000);};
 
@@ -266,37 +284,79 @@ function App() {
     try{
       const data=await parseFile(file);
       if(!data.length) return showToast("File is empty",K.red);
-      const headers=Object.keys(data[0]);
-      const hasFacility=headers.some(h=>/^facility$/i.test(h.trim()));
-      const hasItemName=headers.some(h=>/item.?type.?name/i.test(h.trim()));
-      if(hasFacility && hasItemName){
-        const facCol=headers.find(h=>/^facility$/i.test(h.trim()));
-        const nameCol=headers.find(h=>/item.?type.?name/i.test(h.trim()));
-        const qtyCol=headers.find(h=>/^quantity$/i.test(h.trim()));
-        const FACILITY_TO_CITY={"er_bangalore":"BLR","er_banglore":"BLR","er_kolkata":"KOL","er_delhi":"DEL"};
+
+      // Strip BOM and normalise header names
+      const rawHeaders=Object.keys(data[0]);
+      const cleanHeader=h=>h.replace(/^﻿/,"").trim();
+      const headers=rawHeaders.map(cleanHeader);
+
+      // Remap row keys to clean headers
+      const cleanRows=data.map(row=>{
+        const out={};
+        rawHeaders.forEach((rh,i)=>{out[headers[i]]=row[rh];});
+        return out;
+      });
+
+      // Find columns flexibly
+      const facCol  = headers.find(h=>/^facility$/i.test(h));
+      const nameCol = headers.find(h=>/item.?type.?name/i.test(h));
+      const qtyCol  = headers.find(h=>/^quantity$/i.test(h));
+
+      if(facCol && nameCol && qtyCol){
+        // Auto-detect city from ER_ rows
+        const FMAP={"er_bangalore":"BLR","er_banglore":"BLR","erbanglore":"BLR","erbangalore":"BLR",
+                    "er_kolkata":"KOL","erkolkata":"KOL",
+                    "er_delhi":"DEL","erdelhi":"DEL"};
         let detectedCity=null;
-        for(const row of data){const fac=(row[facCol]||"").toLowerCase().replace(/\s/g,"");if(FACILITY_TO_CITY[fac]){detectedCity=FACILITY_TO_CITY[fac];break;}}
+        for(const row of cleanRows){
+          const fac=(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");
+          if(FMAP[fac]){detectedCity=FMAP[fac];break;}
+        }
         const targetCity=detectedCity||city;
-        const cityFacKey={BLR:"er_bangalore",KOL:"er_kolkata",DEL:"er_delhi"}[targetCity];
+        // Match facility by stripping non-alpha and comparing
+        const cityFacBase={BLR:"erbangalore",KOL:"erkolkata",DEL:"erdelhi"}[targetCity];
         const updates={},log=[];
-        for(const row of data){
-          const fac=(row[facCol]||"").toLowerCase().replace(/\s/g,"");
-          if(fac!==cityFacKey) continue;
+        for(const row of cleanRows){
+          const fac=(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");
+          if(fac!==cityFacBase) continue;
           const short=matchFlavour(row[nameCol]);
           if(!short) continue;
           updates[short]=(updates[short]||0)+(parseInt(row[qtyCol])||0);
           if(!log.includes(short)) log.push(short);
         }
-        if(!log.length) return showToast("No matching ER rows found — check city",K.red);
+        // Build per-city inventory from ALL ER rows in the file
+        const allCityInv={BLR:{},KOL:{},DEL:{}};
+        const cityFacMap={BLR:"erbangalore",KOL:"erkolkata",DEL:"erdelhi"};
+        for(const row of cleanRows){
+          const fac=(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");
+          const matchedCity=Object.keys(cityFacMap).find(c=>cityFacMap[c]===fac);
+          if(!matchedCity) continue;
+          const short=matchFlavour(row[nameCol]);
+          if(!short) continue;
+          allCityInv[matchedCity][short]=(allCityInv[matchedCity][short]||0)+(parseInt(row[qtyCol])||0);
+        }
+        const filledCities=Object.keys(allCityInv).filter(c=>Object.keys(allCityInv[c]).length>0);
+        if(!filledCities.length) return showToast("No ER rows found in file",K.red);
+        // Save all cities
+        setInvByCity(allCityInv);
+        // Determine which city to show — prefer detected, else keep current
+        const activeCity=detectedCity||city;
         if(detectedCity && detectedCity!==city) setCity(detectedCity);
-        setRows(prev=>prev.map(r=>updates[r.flavour]!==undefined?{...r,qty:updates[r.flavour]}:r));
-        setFillLog(p=>({...p,inv:log}));
-        showToast(`Qty filled for ${log.length} flavours (${CITIES[targetCity].label})`,K.red);
+        const activeInv=allCityInv[activeCity];
+        const activeLog=Object.keys(activeInv);
+        setRows(prev=>prev.map(r=>({...r, qty: activeInv[r.flavour]??0})));
+        setFillLog(p=>({...p,inv:activeLog}));
+        const cityLabels=filledCities.map(c=>CITIES[c].label).join(", ");
+        showToast(`✓ Loaded inventory for: ${cityLabels}`,K.red);
         return;
       }
-      setInvMapper({headers,preview:data});
+      // Unknown format — show mapper
+      setInvMapper({headers,preview:cleanRows});
     }
-    catch{showToast("Could not read file",K.red);}
+    catch(err){
+      console.error("Inventory parse error:",err);
+      showToast("Could not read file: "+err.message,K.red);
+    }
     e.target.value="";
   },[city]);
 
@@ -325,11 +385,18 @@ function App() {
         counts[short].total+=1;
         const d=parseDate(row[dateCol]);if(d)counts[short].dates.add(d.toISOString().slice(0,10));
       }
-      const allDates=new Set();Object.values(counts).forEach(c=>c.dates.forEach(d=>allDates.add(d)));
-      const numDays=allDates.size||1;const sorted=[...allDates].sort();
+      // Collect ALL dates across all SKUs to find the report's full date range
+      const allDates=new Set();
+      Object.values(counts).forEach(c=>c.dates.forEach(d=>allDates.add(d)));
+      const sorted=[...allDates].sort();
+      const firstDate=new Date(sorted[0]);
+      const lastDate=new Date(sorted[sorted.length-1]);
+      // Calendar days from first to last order date (inclusive)
+      const numDays=Math.round((lastDate-firstDate)/(1000*60*60*24))+1;
       const results={};
-      for(const[short,c] of Object.entries(counts))results[short]={total:c.total,days:numDays,daily:Math.ceil(c.total/numDays)};
-      setDemandModal({results,dateRange:`${sorted[0]} → ${sorted.slice(-1)[0]} (${numDays}d)`,city:detectedCity||city});
+      for(const[short,c] of Object.entries(counts))
+        results[short]={total:c.total,days:numDays,daily:Math.ceil(c.total/numDays)};
+      setDemandModal({results,dateRange:`${sorted[0]} → ${sorted[sorted.length-1]} (${numDays} days)`,city:detectedCity||city});
     }catch{showToast("Could not read file",K.red);}
     e.target.value="";
   },[city]);
@@ -354,7 +421,7 @@ function App() {
   const totalSend=calc.reduce((s,r)=>s+r.send,0);
   const critical=calc.filter(r=>r.demand>0&&r.lat<3).length;
   const updateRow=(idx,field,val)=>setRows(prev=>prev.map((r,i)=>i===idx?{...r,[field]:val}:r));
-  const reset=()=>{setRows(FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));setFillLog({inv:[],demand:[]});};
+  const reset=()=>{setRows(FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));setFillLog({inv:[],demand:[]});setInvByCity({BLR:{},KOL:{},DEL:{}});};
 
   const exportCSV=()=>{
     const hdr=["Flavour","Full Name","Qty","Daily Demand",`After ${cityConf.transit}D Transit`,"Life After Transit","To Send","After Send","Est Life After Send"];
@@ -461,7 +528,7 @@ function App() {
               fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",fontWeight:600}}>City</div>
             <div style={{display:"flex",gap:8}}>
               {Object.entries(CITIES).map(([key,cfg])=>(
-                <button key={key} onClick={()=>setCity(key)} style={{padding:"9px 18px",borderRadius:6,cursor:"pointer",
+                <button key={key} onClick={()=>switchCity(key)} style={{padding:"9px 18px",borderRadius:6,cursor:"pointer",
                   border:`2px solid ${city===key?K.red:K.bdr}`,
                   background:city===key?K.redDim2:"transparent",
                   color:city===key?K.red:K.t2,
