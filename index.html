@@ -81,21 +81,31 @@ function matchFlavour(val) {
   return score>0?best:null;
 }
 
-function parseDate(str) {
-  if(!str) return null;
-  const s=String(str).trim();
+function parseDate(val) {
+  if(!val) return null;
+  // Already a JS Date object (XLSX parses date cells automatically)
+  if(val instanceof Date) return isNaN(val.getTime()) ? null : val;
+  const s=String(val).trim();
+  // ISO: 2026-02-28 or 2026-02-28T13:36:42 or 2026-02-28 13:36:42
   const iso=s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if(iso) return new Date(iso[0]);
-  const dmy=s.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
-  if(dmy) return new Date(`${dmy[3]}-${dmy[2]}-${dmy[1]}`);
-  return null;
+  if(iso) return new Date(iso[1]+"-"+iso[2]+"-"+iso[3]);
+  // dd/mm/yyyy or dd/mm/yyyy hh:mm:ss
+  const dmy=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if(dmy) return new Date(dmy[3]+"-"+dmy[2].padStart(2,"0")+"-"+dmy[1].padStart(2,"0"));
+  // Try native parse as last resort
+  const d=new Date(s);
+  return isNaN(d.getTime()) ? null : d;
 }
 
 function parseFile(file) {
   return new Promise((res,rej)=>{
     const r=new FileReader();
     r.onload=ev=>{
-      try{const wb=XLSX.read(ev.target.result,{type:"array"});res(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""}));}
+      try{
+        // raw:true preserves strings as-is (important for CSV date strings)
+        const wb=XLSX.read(ev.target.result,{type:"array"});
+        res(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:"",raw:true}));
+      }
       catch(e){rej(e);}
     };
     r.onerror=rej;
@@ -364,34 +374,96 @@ function App() {
   const handleSO=useCallback(async e=>{
     const file=e.target.files?.[0]; if(!file) return;
     try{
-      const data=await parseFile(file);if(!data.length)return showToast("File is empty",K.red);
-      const headers=Object.keys(data[0]);
-      const skuCol=headers.find(h=>/sku.?name|item.?type.?name/i.test(h))||headers.find(h=>/sku/i.test(h))||"";
-      const dateCol=headers.find(h=>/order.?date/i.test(h))||headers.find(h=>/date/i.test(h))||"";
-      const facCol=headers.find(h=>/facility/i.test(h))||"";
-      const statusCol=headers.find(h=>/sale.?order.?item.?status|item.?status/i.test(h))||"";
-      const counts={};let detectedCity=null;
-      for(const row of data){
-        if(String(row[statusCol]||"").toUpperCase()==="CANCELLED") continue;
-        if(!detectedCity&&facCol){const fac=String(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");for(const[k,v] of Object.entries(FACILITY_MAP)){if(fac.includes(k)){detectedCity=v;break;}}}
-        const short=matchFlavour(row[skuCol]);if(!short)continue;
-        if(!counts[short])counts[short]={dates:new Set(),total:0};
-        counts[short].total+=1;
-        const d=parseDate(row[dateCol]);if(d)counts[short].dates.add(d.toISOString().slice(0,10));
+      const data=await parseFile(file);
+      if(!data.length) return showToast("File is empty",K.red);
+
+      // Normalise headers (strip BOM/whitespace)
+      const rawHeaders=Object.keys(data[0]);
+      const norm=h=>h.replace(/^﻿/,"").trim();
+      const headers=rawHeaders.map(norm);
+      const cleanRows=data.map(row=>{
+        const out={};
+        rawHeaders.forEach((rh,i)=>{out[headers[i]]=row[rh];});
+        return out;
+      });
+
+      // Known Unicommerce column names (with fallbacks)
+      const skuCol    = headers.find(h=>h==="SKU Name")
+                     || headers.find(h=>/item.?type.?name/i.test(h))
+                     || headers.find(h=>/sku.?name/i.test(h));
+      const dateCol   = headers.find(h=>/order date/i.test(h));
+      const facCol    = headers.find(h=>/^facility$/i.test(h));
+      const statusCol = headers.find(h=>/sale.?order.?item.?status/i.test(h));
+
+      if(!skuCol)  return showToast("Cannot find SKU Name column",K.red);
+      if(!dateCol) return showToast("Cannot find Order Date column",K.red);
+
+      // Detect city from Facility column
+      const FMAP={
+        "erbangalore":"BLR","erbanglore":"BLR",
+        "erkolkata":"KOL",
+        "erdelhi":"DEL",
+      };
+      let detectedCity=null;
+      if(facCol){
+        for(const row of cleanRows){
+          const fac=(String(row[facCol]||"")).toLowerCase().replace(/[^a-z]/g,"");
+          if(FMAP[fac]){detectedCity=FMAP[fac];break;}
+        }
       }
-      // Collect ALL dates across all SKUs to find the report's full date range
+      const targetCity=detectedCity||city;
+      const cityFacBase={BLR:"erbangalore",KOL:"erkolkata",DEL:"erdelhi"}[targetCity];
+
+      // Count SKUs + collect dates, filtered to this city only
+      const counts={};
       const allDates=new Set();
-      Object.values(counts).forEach(c=>c.dates.forEach(d=>allDates.add(d)));
+
+      for(const row of cleanRows){
+        // Skip cancelled
+        if(statusCol && String(row[statusCol]||"").toUpperCase()==="CANCELLED") continue;
+        // Filter to this city's facility only
+        if(facCol){
+          const fac=String(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");
+          if(fac!==cityFacBase) continue;
+        }
+        // Match SKU
+        const short=matchFlavour(row[skuCol]);
+        if(!short) continue;
+        counts[short]=(counts[short]||0)+1;
+        // Parse date — value is a string like "2026-02-28 13:36:42"
+        const rawDate=String(row[dateCol]||"").trim();
+        // Extract YYYY-MM-DD from start of string (works for ISO and dd/mm/yyyy hh:mm:ss)
+        let dateKey=null;
+        const isoMatch=rawDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        const dmyMatch=rawDate.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+        if(isoMatch)      dateKey=`${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+        else if(dmyMatch) dateKey=`${dmyMatch[3]}-${dmyMatch[2]}-${dmyMatch[1]}`;
+        if(dateKey) allDates.add(dateKey);
+      }
+
+      if(!Object.keys(counts).length)
+        return showToast("No orders found for "+CITIES[targetCity].label,K.red);
+      if(!allDates.size)
+        return showToast("Orders found but dates could not be read",K.red);
+
+      // Date range: first → last calendar day (inclusive)
       const sorted=[...allDates].sort();
-      const firstDate=new Date(sorted[0]);
-      const lastDate=new Date(sorted[sorted.length-1]);
-      // Calendar days from first to last order date (inclusive)
-      const numDays=Math.round((lastDate-firstDate)/(1000*60*60*24))+1;
+      const msPerDay=1000*60*60*24;
+      const numDays=Math.round((new Date(sorted[sorted.length-1])-new Date(sorted[0]))/msPerDay)+1;
+
       const results={};
-      for(const[short,c] of Object.entries(counts))
-        results[short]={total:c.total,days:numDays,daily:Math.ceil(c.total/numDays)};
-      setDemandModal({results,dateRange:`${sorted[0]} → ${sorted[sorted.length-1]} (${numDays} days)`,city:detectedCity||city});
-    }catch{showToast("Could not read file",K.red);}
+      for(const[short,total] of Object.entries(counts))
+        results[short]={total,days:numDays,daily:Math.ceil(total/numDays)};
+
+      setDemandModal({
+        results,
+        dateRange:`${sorted[0]}  →  ${sorted[sorted.length-1]}  (${numDays} days)`,
+        city:targetCity,
+      });
+    }catch(err){
+      console.error("SO parse error:",err);
+      showToast("Error: "+err.message,K.red);
+    }
     e.target.value="";
   },[city]);
 
