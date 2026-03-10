@@ -263,10 +263,65 @@ function App() {
 
   const handleInv=useCallback(async e=>{
     const file=e.target.files?.[0]; if(!file) return;
-    try{const data=await parseFile(file);if(!data.length)return showToast("File is empty",K.red);setInvMapper({headers:Object.keys(data[0]),preview:data});}
-    catch{showToast("Could not read file",K.red);}
+    try{
+      const data=await parseFile(file);
+      if(!data.length) return showToast("File is empty",K.red);
+
+      // Strip BOM and normalise header names
+      const rawHeaders=Object.keys(data[0]);
+      const cleanHeader=h=>h.replace(/^﻿/,"").trim();
+      const headers=rawHeaders.map(cleanHeader);
+
+      // Remap row keys to clean headers
+      const cleanRows=data.map(row=>{
+        const out={};
+        rawHeaders.forEach((rh,i)=>{out[headers[i]]=row[rh];});
+        return out;
+      });
+
+      // Find columns flexibly
+      const facCol  = headers.find(h=>/^facility$/i.test(h));
+      const nameCol = headers.find(h=>/item.?type.?name/i.test(h));
+      const qtyCol  = headers.find(h=>/^quantity$/i.test(h));
+
+      if(facCol && nameCol && qtyCol){
+        // Auto-detect city from ER_ rows
+        const FMAP={"er_bangalore":"BLR","er_banglore":"BLR","erbanglore":"BLR","erbangalore":"BLR",
+                    "er_kolkata":"KOL","erkolkata":"KOL",
+                    "er_delhi":"DEL","erdelhi":"DEL"};
+        let detectedCity=null;
+        for(const row of cleanRows){
+          const fac=(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");
+          if(FMAP[fac]){detectedCity=FMAP[fac];break;}
+        }
+        const targetCity=detectedCity||city;
+        // Match facility by stripping non-alpha and comparing
+        const cityFacBase={BLR:"erbangalore",KOL:"erkolkata",DEL:"erdelhi"}[targetCity];
+        const updates={},log=[];
+        for(const row of cleanRows){
+          const fac=(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");
+          if(fac!==cityFacBase) continue;
+          const short=matchFlavour(row[nameCol]);
+          if(!short) continue;
+          updates[short]=(updates[short]||0)+(parseInt(row[qtyCol])||0);
+          if(!log.includes(short)) log.push(short);
+        }
+        if(!log.length) return showToast("No ER rows found for "+CITIES[targetCity].label,K.red);
+        if(detectedCity && detectedCity!==city) setCity(detectedCity);
+        setRows(prev=>prev.map(r=>updates[r.flavour]!==undefined?{...r,qty:updates[r.flavour]}:r));
+        setFillLog(p=>({...p,inv:log}));
+        showToast(`✓ Qty filled — ${log.length} flavours (${CITIES[targetCity].label})`,K.red);
+        return;
+      }
+      // Unknown format — show mapper
+      setInvMapper({headers,preview:cleanRows});
+    }
+    catch(err){
+      console.error("Inventory parse error:",err);
+      showToast("Could not read file: "+err.message,K.red);
+    }
     e.target.value="";
-  },[]);
+  },[city]);
 
   const applyInv=useCallback(mapping=>{
     const data=invMapper.preview,updates={},log=[];
