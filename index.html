@@ -379,11 +379,18 @@ function App() {
         counts[short].total+=1;
         const d=parseDate(row[dateCol]);if(d)counts[short].dates.add(d.toISOString().slice(0,10));
       }
-      const allDates=new Set();Object.values(counts).forEach(c=>c.dates.forEach(d=>allDates.add(d)));
-      const numDays=allDates.size||1;const sorted=[...allDates].sort();
+      // Collect ALL dates across all SKUs to find the report's full date range
+      const allDates=new Set();
+      Object.values(counts).forEach(c=>c.dates.forEach(d=>allDates.add(d)));
+      const sorted=[...allDates].sort();
+      const firstDate=new Date(sorted[0]);
+      const lastDate=new Date(sorted[sorted.length-1]);
+      // Calendar days from first to last order date (inclusive)
+      const numDays=Math.round((lastDate-firstDate)/(1000*60*60*24))+1;
       const results={};
-      for(const[short,c] of Object.entries(counts))results[short]={total:c.total,days:numDays,daily:Math.ceil(c.total/numDays)};
-      setDemandModal({results,dateRange:`${sorted[0]} → ${sorted.slice(-1)[0]} (${numDays}d)`,city:detectedCity||city});
+      for(const[short,c] of Object.entries(counts))
+        results[short]={total:c.total,days:numDays,daily:Math.ceil(c.total/numDays)};
+      setDemandModal({results,dateRange:`${sorted[0]} → ${sorted[sorted.length-1]} (${numDays} days)`,city:detectedCity||city});
     }catch{showToast("Could not read file",K.red);}
     e.target.value="";
   },[city]);
