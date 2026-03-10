@@ -1,13 +1,625 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ER Stock Calculator</title>
-    <style>* { margin: 0; padding: 0; box-sizing: border-box; }</style>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>KILRR — Stock Calculator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#F5F2EE;color:#1A1A1A;font-family:'IBM Plex Sans',sans-serif}
+  input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
+  input[type=number]{-moz-appearance:textfield}
+  input[type=range]{accent-color:#D92B2B;height:4px;cursor:pointer}
+  select option{background:#fff;color:#1a1a1a}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes slideUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  ::-webkit-scrollbar{width:5px;height:5px}
+  ::-webkit-scrollbar-track{background:#EDE8E2}
+  ::-webkit-scrollbar-thumb{background:#C5BDB5;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo, useRef, useCallback } = React;
+
+const FLAVOUR_MAP = [
+  { short:"KM",         full:"Saza-E-KaaliMirch",        keywords:["saza","kaali","mirch"] },
+  { short:"AFG",        full:"Afghan-Ka-Shaitaan",        keywords:["afghan","shaitaan"] },
+  { short:"LK",         full:"Lucknowi Tamancha",         keywords:["lucknowi","tamancha"] },
+  { short:"TAN",        full:"Tandoori Blast",            keywords:["tandoori","blast"] },
+  { short:"DH",         full:"Dhaniya Mirchi Aur Woh",    keywords:["dhaniya","mirchi","woh"] },
+  { short:"GOA",        full:"Gangs of Awadh",            keywords:["gangs","awadh"] },
+  { short:"Pesto",      full:"Pistol Pesto",              keywords:["pistol","pesto"] },
+  { short:"Peri",       full:"Bloody Peri",               keywords:["bloody","peri"] },
+  { short:"Achari",     full:"Achaari Atyachaari",        keywords:["achaari","atyachaari","achari"] },
+  { short:"Pudina",     full:"Paapi Pudina",              keywords:["paapi","pudina"] },
+  { short:"Shwarma",    full:"Shawarma Ji Ka Beta",       keywords:["shawarma","beta"] },
+  { short:"Curry 9211", full:"CURRY NO. 9 2 11",          keywords:["curry","9211","9 2 11"] },
+  { short:"KMH",        full:"KAALIMIRCH KI HADDCURRY",  keywords:["kaalimirch","hadd","haddcurry"] },
+  { short:"Palak",      full:"PALAK KA PANCHNAMA",        keywords:["palak","panchnama"] },
+];
+
+const FACILITY_MAP = {
+  "erbanglore":"BLR","erbangalore":"BLR","bangalore":"BLR","blr":"BLR",
+  "erkolkata":"KOL","kolkata":"KOL","kol":"KOL",
+  "erdelhi":"DEL","delhi":"DEL","del":"DEL",
+};
+
+const CITIES = {
+  BLR:{label:"Bangalore", transit:6},
+  KOL:{label:"Kolkata",   transit:8},
+  DEL:{label:"Delhi",     transit:7},
+};
+
+const K = {
+  bg:"#F5F2EE", s1:"#FFFFFF", s2:"#F0EBE5", s3:"#E8E0D8",
+  bdr:"#D6CFC7", bdrD:"#B8AEA5",
+  red:"#D92B2B", redDim:"rgba(217,43,43,0.07)", redDim2:"rgba(217,43,43,0.12)",
+  green:"#1A8A4A", greenDim:"rgba(26,138,74,0.08)",
+  amber:"#A06000", amberDim:"rgba(160,96,0,0.08)",
+  ink:"#1A1A1A", t1:"#1A1A1A", t2:"#4A4540", t3:"#8A8580", t4:"#C0B8B0",
+};
+
+const ceil50 = n => Math.ceil(n/50)*50;
+
+function matchFlavour(val) {
+  if(!val) return null;
+  const low = String(val).toLowerCase().trim();
+  const exact = FLAVOUR_MAP.find(f=>f.full.toLowerCase()===low||f.short.toLowerCase()===low);
+  if(exact) return exact.short;
+  let best=null, score=0;
+  for(const f of FLAVOUR_MAP){
+    const s=f.keywords.filter(k=>low.includes(k)).length;
+    if(s>score){score=s;best=f.short;}
+  }
+  return score>0?best:null;
+}
+
+function parseDate(str) {
+  if(!str) return null;
+  const s=String(str).trim();
+  const iso=s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(iso) return new Date(iso[0]);
+  const dmy=s.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if(dmy) return new Date(`${dmy[3]}-${dmy[2]}-${dmy[1]}`);
+  return null;
+}
+
+function parseFile(file) {
+  return new Promise((res,rej)=>{
+    const r=new FileReader();
+    r.onload=ev=>{
+      try{const wb=XLSX.read(ev.target.result,{type:"array"});res(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""}));}
+      catch(e){rej(e);}
+    };
+    r.onerror=rej;
+    r.readAsArrayBuffer(file);
+  });
+}
+
+function NumInput({value, onChange}) {
+  const [focus,setFocus]=useState(false);
+  return <input type="number" min={0} value={value}
+    onChange={e=>onChange(Math.max(0,parseInt(e.target.value)||0))}
+    onFocus={()=>setFocus(true)} onBlur={()=>setFocus(false)}
+    style={{width:"100%",padding:"7px 10px",borderRadius:5,
+      border:`2px solid ${focus?K.red:K.bdr}`,
+      background:focus?"#fff":K.s2,color:K.ink,
+      fontFamily:"'IBM Plex Mono',monospace",fontSize:13,
+      fontWeight:600,outline:"none",textAlign:"center",transition:"all .15s"}}/>;
+}
+
+function StatusChip({life}) {
+  const cfg = life<0
+    ? {label:"OVERSTOCK",bg:"rgba(91,33,182,0.08)", color:"#5B21B6", border:"rgba(91,33,182,0.2)"}
+    : life<7
+    ? {label:"CRITICAL",  bg:K.redDim2, color:K.red, border:"rgba(217,43,43,0.25)"}
+    : {label:"OK",        bg:K.greenDim, color:K.green, border:"rgba(26,138,74,0.2)"};
+  return <span style={{padding:"3px 10px",borderRadius:4,fontSize:9,fontWeight:700,
+    letterSpacing:1.2,fontFamily:"'IBM Plex Mono',monospace",
+    background:cfg.bg,color:cfg.color,border:`1px solid ${cfg.border}`}}>{cfg.label}</span>;
+}
+
+function Modal({children}) {
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",
+    display:"flex",alignItems:"center",justifyContent:"center",
+    zIndex:200,backdropFilter:"blur(4px)"}}>
+    <div style={{background:K.s1,border:`2px solid ${K.bdr}`,borderRadius:12,
+      padding:32,width:560,maxWidth:"95vw",maxHeight:"90vh",overflowY:"auto",
+      boxShadow:"0 24px 64px rgba(0,0,0,0.12)",animation:"slideUp .2s ease"}}>
+      {children}
+    </div>
+  </div>;
+}
+
+function SectionHead({children, accent}) {
+  return <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20}}>
+    <div style={{width:3,height:20,background:accent||K.red,borderRadius:2}}/>
+    <span style={{fontFamily:"'Bebas Neue',cursive",fontSize:18,letterSpacing:2,color:K.ink}}>{children}</span>
+  </div>;
+}
+
+function ColumnMapper({title, headers, preview, fields, onConfirm, onClose}) {
+  const [mapping,setMapping]=useState(()=>{
+    const init={};
+    fields.forEach(f=>{init[f.key]=headers.find(h=>f.detect.some(d=>h.toLowerCase().includes(d)))||"";});
+    return init;
+  });
+  return <Modal>
+    <SectionHead>{title}</SectionHead>
+    {fields.map(f=>(
+      <div key={f.key} style={{marginBottom:18}}>
+        <div style={{fontSize:11,color:K.t2,letterSpacing:.5,marginBottom:6,fontWeight:600}}>{f.label}</div>
+        <select value={mapping[f.key]} onChange={e=>setMapping(m=>({...m,[f.key]:e.target.value}))}
+          style={{background:K.s2,color:mapping[f.key]?K.ink:K.t3,
+            border:`2px solid ${mapping[f.key]?K.bdrD:K.bdr}`,
+            borderRadius:6,padding:"9px 12px",fontSize:13,
+            fontFamily:"'IBM Plex Sans',sans-serif",outline:"none",width:"100%",cursor:"pointer"}}>
+          <option value="">— skip —</option>
+          {headers.map(h=><option key={h} value={h}>{h}</option>)}
+        </select>
+      </div>
+    ))}
+    <div style={{background:K.s2,borderRadius:6,padding:16,marginBottom:24,
+      border:`1px solid ${K.bdr}`,maxHeight:140,overflowY:"auto"}}>
+      <div style={{fontSize:9,color:K.t3,letterSpacing:.8,marginBottom:8,
+        fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",fontWeight:600}}>Preview</div>
+      {preview.slice(0,5).map((row,i)=>{
+        const v=row[mapping["sku"]||""]||"";
+        const m=matchFlavour(v);
+        return <div key={i} style={{display:"flex",gap:10,fontSize:11,marginBottom:5,alignItems:"center"}}>
+          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,
+            color:m?K.green:K.red,background:m?K.greenDim:K.redDim2,
+            padding:"2px 7px",borderRadius:4,fontSize:10,minWidth:80}}>
+            {m?`✓ ${m}`:"? unmatched"}
+          </span>
+          <span style={{color:K.t3,fontSize:10}}>{String(v).slice(0,35)}</span>
+        </div>;
+      })}
+    </div>
+    <div style={{display:"flex",gap:10}}>
+      <button onClick={()=>onConfirm(mapping)} style={{flex:1,padding:12,borderRadius:6,
+        border:"none",background:K.red,color:"#fff",fontWeight:700,fontSize:13,
+        cursor:"pointer",fontFamily:"'IBM Plex Sans',sans-serif"}}>Apply & Fill</button>
+      <button onClick={onClose} style={{padding:"12px 20px",borderRadius:6,
+        border:`2px solid ${K.bdr}`,background:"transparent",color:K.t2,
+        fontSize:13,cursor:"pointer",fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600}}>Cancel</button>
+    </div>
+  </Modal>;
+}
+
+function DemandPreview({results, dateRange, city, onConfirm, onClose}) {
+  const total=Object.values(results).reduce((s,r)=>s+r.total,0);
+  return <Modal>
+    <SectionHead accent={K.green}>Demand Preview</SectionHead>
+    <div style={{display:"flex",gap:10,marginBottom:20,flexWrap:"wrap"}}>
+      {[{l:"City",v:CITIES[city]?.label||city},{l:"Period",v:dateRange},{l:"Orders",v:total.toLocaleString()}].map((s,i)=>(
+        <div key={i} style={{background:K.s2,border:`1px solid ${K.bdr}`,borderRadius:6,padding:"8px 14px",flex:1,minWidth:90}}>
+          <div style={{fontSize:9,color:K.t3,letterSpacing:.8,fontFamily:"'IBM Plex Mono',monospace",
+            marginBottom:3,textTransform:"uppercase",fontWeight:600}}>{s.l}</div>
+          <div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:13,color:K.ink}}>{s.v}</div>
+        </div>
+      ))}
+    </div>
+    <div style={{border:`1px solid ${K.bdr}`,borderRadius:8,overflow:"hidden",marginBottom:22,maxHeight:300,overflowY:"auto"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+        <thead>
+          <tr style={{background:K.s2,borderBottom:`2px solid ${K.bdr}`}}>
+            {["Flavour","Full Name","Sold","Days","Daily Demand"].map(h=>(
+              <th key={h} style={{padding:"9px 14px",textAlign:"left",fontSize:10,color:K.t2,
+                letterSpacing:.6,fontFamily:"'IBM Plex Mono',monospace",
+                textTransform:"uppercase",fontWeight:600}}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {FLAVOUR_MAP.map((f,i)=>{
+            const r=results[f.short];
+            return <tr key={i} style={{borderBottom:`1px solid ${K.bdr}`}}>
+              <td style={{padding:"8px 14px",fontFamily:"'Bebas Neue',cursive",
+                fontSize:15,letterSpacing:1,color:K.red}}>{f.short}</td>
+              <td style={{padding:"8px 14px",fontSize:11,color:K.t2}}>{f.full}</td>
+              <td style={{padding:"8px 14px",fontFamily:"'IBM Plex Mono',monospace",
+                fontWeight:600,color:r?K.ink:K.t4}}>{r?r.total:"—"}</td>
+              <td style={{padding:"8px 14px",fontFamily:"'IBM Plex Mono',monospace",color:K.t2}}>{r?r.days:"—"}</td>
+              <td style={{padding:"8px 14px"}}>
+                {r?<span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:16,color:K.green}}>{r.daily}</span>
+                  :<span style={{color:K.t4,fontSize:11}}>0</span>}
+              </td>
+            </tr>;
+          })}
+        </tbody>
+      </table>
+    </div>
+    <div style={{display:"flex",gap:10}}>
+      <button onClick={onConfirm} style={{flex:1,padding:12,borderRadius:6,border:"none",
+        background:K.green,color:"#fff",fontWeight:700,fontSize:13,
+        cursor:"pointer",fontFamily:"'IBM Plex Sans',sans-serif"}}>Fill into Calculator</button>
+      <button onClick={onClose} style={{padding:"12px 20px",borderRadius:6,
+        border:`2px solid ${K.bdr}`,background:"transparent",color:K.t2,
+        fontSize:13,cursor:"pointer",fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600}}>Cancel</button>
+    </div>
+  </Modal>;
+}
+
+function App() {
+  const [city,setCity]=useState("BLR");
+  const [targetDays,setTargetDays]=useState(12);
+  const [rows,setRows]=useState(()=>FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));
+  const [invMapper,setInvMapper]=useState(null);
+  const [demandModal,setDemandModal]=useState(null);
+  const [toast,setToast]=useState(null);
+  const [fillLog,setFillLog]=useState({inv:[],demand:[]});
+  const invRef=useRef(), soRef=useRef();
+  const cityConf=CITIES[city];
+
+  const showToast=(msg,color=K.green)=>{setToast({msg,color});setTimeout(()=>setToast(null),3000);};
+
+  const handleInv=useCallback(async e=>{
+    const file=e.target.files?.[0]; if(!file) return;
+    try{const data=await parseFile(file);if(!data.length)return showToast("File is empty",K.red);setInvMapper({headers:Object.keys(data[0]),preview:data});}
+    catch{showToast("Could not read file",K.red);}
+    e.target.value="";
+  },[]);
+
+  const applyInv=useCallback(mapping=>{
+    const data=invMapper.preview,updates={},log=[];
+    for(const row of data){const s=matchFlavour(row[mapping.sku]);if(!s)continue;updates[s]=parseInt(row[mapping.qty])||0;log.push(s);}
+    setRows(prev=>prev.map(r=>updates[r.flavour]!==undefined?{...r,qty:updates[r.flavour]}:r));
+    setFillLog(p=>({...p,inv:log}));setInvMapper(null);showToast(`Qty filled for ${log.length} flavours`,K.red);
+  },[invMapper]);
+
+  const handleSO=useCallback(async e=>{
+    const file=e.target.files?.[0]; if(!file) return;
+    try{
+      const data=await parseFile(file);if(!data.length)return showToast("File is empty",K.red);
+      const headers=Object.keys(data[0]);
+      const skuCol=headers.find(h=>/sku.?name|item.?type.?name/i.test(h))||headers.find(h=>/sku/i.test(h))||"";
+      const dateCol=headers.find(h=>/order.?date/i.test(h))||headers.find(h=>/date/i.test(h))||"";
+      const facCol=headers.find(h=>/facility/i.test(h))||"";
+      const statusCol=headers.find(h=>/sale.?order.?item.?status|item.?status/i.test(h))||"";
+      const counts={};let detectedCity=null;
+      for(const row of data){
+        if(String(row[statusCol]||"").toUpperCase()==="CANCELLED") continue;
+        if(!detectedCity&&facCol){const fac=String(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");for(const[k,v] of Object.entries(FACILITY_MAP)){if(fac.includes(k)){detectedCity=v;break;}}}
+        const short=matchFlavour(row[skuCol]);if(!short)continue;
+        if(!counts[short])counts[short]={dates:new Set(),total:0};
+        counts[short].total+=1;
+        const d=parseDate(row[dateCol]);if(d)counts[short].dates.add(d.toISOString().slice(0,10));
+      }
+      const allDates=new Set();Object.values(counts).forEach(c=>c.dates.forEach(d=>allDates.add(d)));
+      const numDays=allDates.size||1;const sorted=[...allDates].sort();
+      const results={};
+      for(const[short,c] of Object.entries(counts))results[short]={total:c.total,days:numDays,daily:Math.ceil(c.total/numDays)};
+      setDemandModal({results,dateRange:`${sorted[0]} → ${sorted.slice(-1)[0]} (${numDays}d)`,city:detectedCity||city});
+    }catch{showToast("Could not read file",K.red);}
+    e.target.value="";
+  },[city]);
+
+  const applyDemand=useCallback(()=>{
+    const{results,city:dc}=demandModal;const log=[];
+    setRows(prev=>prev.map(r=>{const res=results[r.flavour];if(!res)return r;log.push(r.flavour);return{...r,demand:res.daily};}));
+    setFillLog(p=>({...p,demand:log}));if(dc&&dc!==city)setCity(dc);
+    setDemandModal(null);showToast(`Demand filled for ${log.length} flavours`,K.green);
+  },[demandModal,city]);
+
+  const calc=useMemo(()=>rows.map(r=>{
+    const sat=r.qty-r.demand*cityConf.transit;
+    const lat=r.demand>0?sat/r.demand:0;
+    const need=targetDays*r.demand-sat;
+    const send=r.demand===0?0:Math.max(0,ceil50(need));
+    const sas=sat+send;
+    const las=r.demand>0?sas/r.demand:0;
+    return{...r,sat,lat,send,sas,las};
+  }),[rows,cityConf,targetDays]);
+
+  const totalSend=calc.reduce((s,r)=>s+r.send,0);
+  const critical=calc.filter(r=>r.demand>0&&r.lat<3).length;
+  const updateRow=(idx,field,val)=>setRows(prev=>prev.map((r,i)=>i===idx?{...r,[field]:val}:r));
+  const reset=()=>{setRows(FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));setFillLog({inv:[],demand:[]});};
+
+  const exportCSV=()=>{
+    const hdr=["Flavour","Full Name","Qty","Daily Demand",`After ${cityConf.transit}D Transit`,"Life After Transit","To Send","After Send","Est Life After Send"];
+    const body=calc.map(r=>{const fm=FLAVOUR_MAP.find(f=>f.short===r.flavour);return[r.flavour,fm?.full,r.qty,r.demand,r.demand>0?r.sat.toFixed(0):"",r.demand>0?r.lat.toFixed(1)+"d":"",r.demand>0?r.send:"",r.demand>0?r.sas.toFixed(0):"",r.demand>0?r.las.toFixed(1)+"d":""];});
+    const csv=[hdr,...body].map(r=>r.join(",")).join("\n");
+    const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);
+    a.download=`kilrr-stock-${city}-${new Date().toISOString().slice(0,10)}.csv`;a.click();
+    showToast("CSV exported",K.green);
+  };
+
+  const lifeSc=d=>d<0?"#5B21B6":d<7?K.red:K.green;
+
+  return (
+    <div style={{minHeight:"100vh",background:K.bg,color:K.ink}}>
+
+      {toast&&<div style={{position:"fixed",top:20,right:24,zIndex:300,padding:"11px 20px",
+        borderRadius:8,background:K.s1,color:toast.color,fontWeight:700,fontSize:12,
+        letterSpacing:.4,border:`2px solid ${toast.color}`,
+        boxShadow:"0 8px 32px rgba(0,0,0,0.1)",animation:"fadeIn .2s ease",
+        fontFamily:"'IBM Plex Mono',monospace"}}>{toast.msg}</div>}
+
+      {invMapper&&<ColumnMapper title="Map Inventory Columns" headers={invMapper.headers} preview={invMapper.preview}
+        fields={[
+          {key:"sku",label:"SKU / Product Name Column",detect:["sku","item","product","name"]},
+          {key:"qty",label:"Qty In-Hand Column",detect:["qty","quantity","available","inventory","stock"]},
+        ]} onConfirm={applyInv} onClose={()=>setInvMapper(null)}/>}
+
+      {demandModal&&<DemandPreview results={demandModal.results} dateRange={demandModal.dateRange}
+        city={demandModal.city} onConfirm={applyDemand} onClose={()=>setDemandModal(null)}/>}
+
+      {/* HEADER */}
+      <div style={{background:K.s1,borderBottom:`2px solid ${K.bdr}`,padding:"0 32px",
+        position:"sticky",top:0,zIndex:100,boxShadow:"0 2px 12px rgba(0,0,0,0.06)"}}>
+        <div style={{height:3,background:`linear-gradient(90deg,${K.red},#FF6B35)`,margin:"0 -32px"}}/>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 0"}}>
+          <div style={{display:"flex",alignItems:"center",gap:16}}>
+            <span style={{fontFamily:"'Bebas Neue',cursive",fontSize:26,letterSpacing:5,color:K.red}}>KILRR</span>
+            <div style={{width:1,height:26,background:K.bdr}}/>
+            <div>
+              <div style={{fontFamily:"'Bebas Neue',cursive",fontSize:17,letterSpacing:2.5,color:K.ink}}>STOCK SENDING CALCULATOR</div>
+              <div style={{fontSize:10,color:K.t3,marginTop:1,fontFamily:"'IBM Plex Mono',monospace"}}>
+                {cityConf.label} · {cityConf.transit}D transit · Target {targetDays}d
+              </div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <input ref={invRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleInv} style={{display:"none"}}/>
+            <input ref={soRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleSO} style={{display:"none"}}/>
+            {[
+              {label:fillLog.inv.length?`✓ Inventory (${fillLog.inv.length})`:"⬆ Inventory",onClick:()=>invRef.current.click(),active:fillLog.inv.length>0,color:K.red},
+              {label:fillLog.demand.length?`✓ Sale Orders (${fillLog.demand.length})`:"⬆ Sale Orders",onClick:()=>soRef.current.click(),active:fillLog.demand.length>0,color:K.green},
+              {label:"↓ Export CSV",onClick:exportCSV,active:false,color:K.t2},
+              {label:"Reset",onClick:reset,active:false,color:K.t2},
+            ].map((b,i)=>(
+              <button key={i} onClick={b.onClick} style={{padding:"8px 16px",borderRadius:6,cursor:"pointer",
+                border:`2px solid ${b.active?b.color:K.bdr}`,
+                background:b.active?`${b.color}10`:"transparent",
+                color:b.active?b.color:K.t2,
+                fontFamily:"'IBM Plex Mono',monospace",fontSize:11,fontWeight:600,
+                letterSpacing:.3,transition:"all .15s"}}>{b.label}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{padding:"24px 32px",maxWidth:1500,margin:"0 auto"}}>
+
+        {/* STEP CARDS */}
+        {(!fillLog.inv.length||!fillLog.demand.length)&&(
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:22}}>
+            {[
+              {n:"01",label:"Upload Inventory Report",sub:"Unicommerce → Reports → Inventory Snapshot",done:fillLog.inv.length>0,color:K.red,count:fillLog.inv.length,fn:()=>invRef.current.click()},
+              {n:"02",label:"Upload Sale Orders",sub:"Unicommerce → Reports → Sale Orders",done:fillLog.demand.length>0,color:K.green,count:fillLog.demand.length,fn:()=>soRef.current.click()},
+            ].map(s=>(
+              <div key={s.n} onClick={s.done?undefined:s.fn}
+                style={{background:K.s1,borderRadius:10,padding:"18px 22px",
+                  cursor:s.done?"default":"pointer",
+                  border:`2px solid ${s.done?s.color:K.bdr}`,
+                  display:"flex",alignItems:"center",gap:18,
+                  transition:"all .2s",
+                  boxShadow:s.done?`0 0 0 4px ${s.color}08`:"0 2px 8px rgba(0,0,0,0.04)"}}>
+                <div style={{width:44,height:44,borderRadius:8,flexShrink:0,
+                  background:s.done?`${s.color}10`:K.s2,
+                  border:`2px solid ${s.done?s.color:K.bdr}`,
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  fontFamily:"'Bebas Neue',cursive",fontSize:20,
+                  color:s.done?s.color:K.t3}}>
+                  {s.done?"✓":s.n}
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:700,color:s.done?s.color:K.ink}}>{s.label}</div>
+                  <div style={{fontSize:11,color:K.t3,marginTop:3}}>{s.done?`${s.count} flavours loaded`:s.sub}</div>
+                </div>
+                {!s.done&&<span style={{color:K.bdrD,fontSize:18}}>→</span>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* CONTROLS */}
+        <div style={{display:"grid",gridTemplateColumns:"auto auto 1fr",gap:14,marginBottom:22,alignItems:"stretch"}}>
+          <div style={{background:K.s1,border:`2px solid ${K.bdr}`,borderRadius:10,padding:"16px 20px"}}>
+            <div style={{fontSize:10,color:K.t3,letterSpacing:.8,marginBottom:12,
+              fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",fontWeight:600}}>City</div>
+            <div style={{display:"flex",gap:8}}>
+              {Object.entries(CITIES).map(([key,cfg])=>(
+                <button key={key} onClick={()=>setCity(key)} style={{padding:"9px 18px",borderRadius:6,cursor:"pointer",
+                  border:`2px solid ${city===key?K.red:K.bdr}`,
+                  background:city===key?K.redDim2:"transparent",
+                  color:city===key?K.red:K.t2,
+                  fontFamily:"'IBM Plex Mono',monospace",fontSize:12,fontWeight:700,
+                  letterSpacing:.5,transition:"all .15s"}}>
+                  {key}<div style={{fontSize:9,opacity:.7,marginTop:2,fontWeight:400}}>{cfg.transit}D</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{background:K.s1,border:`2px solid ${K.bdr}`,borderRadius:10,padding:"16px 20px",minWidth:230}}>
+            <div style={{fontSize:10,color:K.t3,letterSpacing:.8,marginBottom:12,
+              fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",fontWeight:600}}>Target Days</div>
+            <div style={{display:"flex",alignItems:"center",gap:14}}>
+              <input type="range" min={7} max={21} step={1} value={targetDays}
+                onChange={e=>setTargetDays(+e.target.value)} style={{flex:1}}/>
+              <span style={{fontFamily:"'Bebas Neue',cursive",fontSize:34,color:K.red,minWidth:50,lineHeight:1}}>
+                {targetDays}<span style={{fontSize:16,color:K.t3}}>d</span>
+              </span>
+            </div>
+          </div>
+
+          <div style={{background:K.s1,border:`2px solid ${K.bdr}`,borderLeft:`4px solid ${K.red}`,
+            borderRadius:10,padding:"16px 24px",display:"flex",alignItems:"center",gap:24}}>
+            <div>
+              <div style={{fontSize:10,color:K.t3,letterSpacing:.8,marginBottom:4,
+                fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",fontWeight:600}}>Total Packets to Send</div>
+              <div style={{fontFamily:"'Bebas Neue',cursive",fontSize:42,color:K.ink,lineHeight:1}}>
+                {totalSend.toLocaleString()}
+                <span style={{fontSize:16,color:K.t3,marginLeft:8,fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:400}}>packets</span>
+              </div>
+            </div>
+            {critical>0&&<div style={{marginLeft:"auto",background:K.redDim2,border:`2px solid ${K.red}`,
+              borderRadius:8,padding:"10px 18px",textAlign:"center"}}>
+              <div style={{fontFamily:"'Bebas Neue',cursive",fontSize:28,color:K.red,lineHeight:1}}>{critical}</div>
+              <div style={{fontSize:10,color:K.red,letterSpacing:.6,marginTop:2,
+                fontFamily:"'IBM Plex Mono',monospace",fontWeight:600}}>CRITICAL</div>
+            </div>}
+          </div>
+        </div>
+
+        {/* TABLE */}
+        <div style={{background:K.s1,border:`2px solid ${K.bdr}`,borderRadius:10,overflow:"hidden",
+          boxShadow:"0 2px 12px rgba(0,0,0,0.04)"}}>
+          <div style={{background:K.s2,padding:"12px 22px",display:"flex",justifyContent:"space-between",
+            alignItems:"center",borderBottom:`2px solid ${K.bdr}`}}>
+            <span style={{fontFamily:"'Bebas Neue',cursive",fontSize:14,letterSpacing:2.5,color:K.t2}}>
+              DISPATCH PLAN — {cityConf.label.toUpperCase()} — {new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}
+            </span>
+            <div style={{display:"flex",gap:16,fontSize:10,color:K.t3,fontFamily:"'IBM Plex Mono',monospace"}}>
+              <span style={{display:"flex",alignItems:"center",gap:5}}>
+                <div style={{width:8,height:8,borderRadius:2,background:K.red}}/>inv filled
+              </span>
+              <span style={{display:"flex",alignItems:"center",gap:5}}>
+                <div style={{width:8,height:8,borderRadius:2,background:K.green}}/>demand filled
+              </span>
+            </div>
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse"}}>
+              <thead>
+                <tr style={{background:K.s2,borderBottom:`2px solid ${K.bdr}`}}>
+                  {[
+                    {h:"",w:16},
+                    {h:"Flavour"},
+                    {h:"Full Name"},
+                    {h:"Qty In-Hand",c:K.red,sub:"⬆ or type"},
+                    {h:"Daily Demand",c:K.green,sub:"⬆ or type"},
+                    {h:`After ${cityConf.transit}D Transit`},
+                    {h:"Life"},
+                    {h:"To Send",c:K.amber},
+                    {h:"After Send"},
+                    {h:"Est Life"},
+                    {h:"Status"},
+                  ].map((col,i)=>(
+                    <th key={i} style={{padding:"11px 14px",textAlign:"left",
+                      fontSize:9,color:col.c||K.t3,letterSpacing:.8,
+                      fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",
+                      fontWeight:700,whiteSpace:"nowrap",
+                      ...(col.w?{width:col.w}:{})}}>
+                      {col.h}
+                      {col.sub&&<div style={{fontWeight:400,letterSpacing:.2,color:K.t4,marginTop:1}}>{col.sub}</div>}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {calc.map((row,idx)=>{
+                  const fm=FLAVOUR_MAP.find(f=>f.short===row.flavour);
+                  const invF=fillLog.inv.includes(row.flavour);
+                  const dmdF=fillLog.demand.includes(row.flavour);
+                  const urg=row.demand>0&&row.lat<3;
+                  const rowBg=urg?"#FFF0F0":idx%2===0?K.s1:"#FAFAF8";
+                  return <tr key={idx}
+                    style={{borderBottom:`1px solid ${K.bdr}`,background:rowBg,transition:"background .1s"}}
+                    onMouseEnter={e=>e.currentTarget.style.background=K.s3}
+                    onMouseLeave={e=>e.currentTarget.style.background=rowBg}>
+                    <td style={{padding:"8px 0 8px 14px",width:16}}>
+                      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                        {invF&&<div style={{width:5,height:5,borderRadius:"50%",background:K.red}}/>}
+                        {dmdF&&<div style={{width:5,height:5,borderRadius:"50%",background:K.green}}/>}
+                      </div>
+                    </td>
+                    <td style={{padding:"8px 14px"}}>
+                      <span style={{fontFamily:"'Bebas Neue',cursive",fontSize:16,letterSpacing:1,
+                        color:urg?K.red:K.ink}}>{row.flavour}</span>
+                    </td>
+                    <td style={{padding:"8px 14px"}}>
+                      <span style={{fontSize:11,color:K.t2}}>{fm?.full}</span>
+                    </td>
+                    <td style={{padding:"6px 10px",minWidth:100}}>
+                      <NumInput value={row.qty} onChange={v=>updateRow(idx,"qty",v)}/>
+                    </td>
+                    <td style={{padding:"6px 10px",minWidth:100}}>
+                      <NumInput value={row.demand} onChange={v=>updateRow(idx,"demand",v)}/>
+                    </td>
+                    <td style={{padding:"10px 14px"}}>
+                      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,fontSize:13,
+                        color:row.demand>0?(row.sat<0?K.red:K.ink):K.t4}}>
+                        {row.demand>0?row.sat.toFixed(0):"—"}
+                      </span>
+                    </td>
+                    <td style={{padding:"10px 14px"}}>
+                      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:13,
+                        color:row.demand>0?lifeSc(row.lat):K.t4}}>
+                        {row.demand>0?`${row.lat.toFixed(1)}d`:"—"}
+                      </span>
+                    </td>
+                    <td style={{padding:"10px 14px"}}>
+                      {row.demand>0
+                        ?row.send>0
+                          ?<span style={{fontFamily:"'Bebas Neue',cursive",fontSize:20,color:K.amber,letterSpacing:.5}}>{row.send.toLocaleString()}</span>
+                          :<span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:13,color:K.t3,fontWeight:600}}>0</span>
+                        :<span style={{color:K.t4}}>—</span>}
+                    </td>
+                    <td style={{padding:"10px 14px"}}>
+                      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:500,fontSize:13,color:row.demand>0?K.t2:K.t4}}>
+                        {row.demand>0?row.sas.toFixed(0):"—"}
+                      </span>
+                    </td>
+                    <td style={{padding:"10px 14px"}}>
+                      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:13,
+                        color:row.demand>0?lifeSc(row.las):K.t4}}>
+                        {row.demand>0?`${row.las.toFixed(1)}d`:"—"}
+                      </span>
+                    </td>
+                    <td style={{padding:"8px 14px"}}>
+                      {row.demand>0?<StatusChip life={row.las}/>:<span style={{color:K.t4,fontSize:10}}>—</span>}
+                    </td>
+                  </tr>;
+                })}
+              </tbody>
+              <tfoot>
+                <tr style={{borderTop:`2px solid ${K.bdrD}`,background:K.s2}}>
+                  <td colSpan={7} style={{padding:"13px 14px",fontSize:11,color:K.t2,
+                    letterSpacing:.6,fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,textTransform:"uppercase"}}>
+                    Total Dispatch
+                  </td>
+                  <td style={{padding:"13px 14px"}}>
+                    <span style={{fontFamily:"'Bebas Neue',cursive",fontSize:22,color:K.amber}}>
+                      {totalSend.toLocaleString()} pkts
+                    </span>
+                  </td>
+                  <td colSpan={3}/>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+
+        {/* Formula bar */}
+        <div style={{marginTop:14,padding:"12px 22px",background:K.s1,
+          border:`2px solid ${K.bdr}`,borderRadius:8,display:"flex",gap:24,flexWrap:"wrap",alignItems:"center"}}>
+          <span style={{fontSize:9,color:K.t3,letterSpacing:.8,fontFamily:"'IBM Plex Mono',monospace",
+            textTransform:"uppercase",fontWeight:700}}>Formulas</span>
+          {[
+            `After transit = Qty − (Demand × ${cityConf.transit})`,
+            `To Send = ceil(max(0, ${targetDays}×D − Stock) ÷ 50) × 50`,
+            `Daily Demand = Total sold ÷ Unique order days`,
+          ].map((f,i)=>(
+            <span key={i} style={{fontSize:11,color:K.t2,fontFamily:"'IBM Plex Mono',monospace"}}>{f}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
 </html>
