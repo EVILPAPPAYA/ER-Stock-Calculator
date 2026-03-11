@@ -460,12 +460,14 @@ function App() {
       const skuCol    = headers.find(h=>h==="SKU Name")
                      || headers.find(h=>/item.?type.?name/i.test(h))
                      || headers.find(h=>/sku.?name/i.test(h));
-      const dateCol   = headers.find(h=>/order date/i.test(h));
+      // Use Invoice Created for date range (earliest invoice → latest invoice = billing period)
+      const dateCol   = headers.find(h=>h==="Invoice Created")
+                     || headers.find(h=>/invoice.?creat/i.test(h));
       const facCol    = headers.find(h=>/^facility$/i.test(h));
       const statusCol = headers.find(h=>/sale.?order.?item.?status/i.test(h));
 
       if(!skuCol)  return showToast("Cannot find SKU Name column",K.red);
-      if(!dateCol) return showToast("Cannot find Order Date column",K.red);
+      if(!dateCol) return showToast("Cannot find Invoice Created column",K.red);
 
 
 
@@ -528,7 +530,7 @@ function App() {
 
       setDemandModal({
         results,
-        dateRange:`${sorted[0]}  →  ${sorted[sorted.length-1]}  (${numDays} days)`,
+        dateRange:`${sorted[0]}  →  ${sorted[sorted.length-1]}  (${numDays} invoice days)`,
         city:targetCity,
       });
     }catch(err){
