@@ -338,7 +338,9 @@ function DemandPreview({byCityData, onConfirm, onClose}) {
         border:`2px solid ${K.bdr}`,background:"transparent",color:K.t2,
         fontSize:13,cursor:"pointer",fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600}}>Cancel</button>
     </div>
-  </Modal>
+  </Modal>;
+}
+
 function App() {
   const [city,setCity]=useState("BLR");
   const [targetDays,setTargetDays]=useState(12);
