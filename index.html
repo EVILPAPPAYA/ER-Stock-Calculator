@@ -342,18 +342,47 @@ function DemandPreview({byCityData, onConfirm, onClose}) {
 }
 
 function App() {
-  const [city,setCity]=useState("BLR");
-  const [targetDays,setTargetDays]=useState(12);
-  const [rows,setRows]=useState(()=>FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));
-  // Store inventory qty separately per city so switching city swaps the right qtys
-  const [invByCity,setInvByCity]=useState({BLR:{},KOL:{},DEL:{}});
-  const [demandByCity,setDemandByCity]=useState({BLR:{},KOL:{},DEL:{}});
+  // ── Load saved state: URL hash takes priority (shared link), then localStorage ──
+  const loadSaved = () => {
+    try {
+      // 1. Check URL hash first (shared link)
+      if (window.location.hash && window.location.hash.length > 1) {
+        const decoded = JSON.parse(atob(window.location.hash.slice(1)));
+        if (decoded && decoded.rows) return decoded;
+      }
+    } catch(e) {}
+    try {
+      // 2. Fall back to localStorage
+      const saved = localStorage.getItem("kilrr_state");
+      if (saved) {
+        const decoded = JSON.parse(saved);
+        if (decoded && decoded.rows) return decoded;
+      }
+    } catch(e) {}
+    return null;
+  };
+
+  const saved = loadSaved();
+  const [city,setCity]=useState(saved?.city || "BLR");
+  const [targetDays,setTargetDays]=useState(saved?.targetDays || 12);
+  const [rows,setRows]=useState(()=> saved?.rows || FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));
+  const [invByCity,setInvByCity]=useState(saved?.invByCity || {BLR:{},KOL:{},DEL:{}});
+  const [demandByCity,setDemandByCity]=useState(saved?.demandByCity || {BLR:{},KOL:{},DEL:{}});
   const [invMapper,setInvMapper]=useState(null);
   const [demandModal,setDemandModal]=useState(null);
   const [toast,setToast]=useState(null);
-  const [fillLog,setFillLog]=useState({inv:[],demand:[]});
+  const [fillLog,setFillLog]=useState(saved?.fillLog || {inv:[],demand:[]});
   const invRef=useRef(), soRef=useRef();
   const cityConf=CITIES[city];
+
+  // ── Auto-save to localStorage whenever key state changes ──
+  const { useEffect } = React;
+  useEffect(()=>{
+    try {
+      const state = { city, targetDays, rows, invByCity, demandByCity, fillLog };
+      localStorage.setItem("kilrr_state", JSON.stringify(state));
+    } catch(e) {}
+  }, [city, targetDays, rows, invByCity, demandByCity, fillLog]);
 
   // When city changes, swap in that city's inventory qtys AND demand
   const switchCity=useCallback((newCity)=>{
@@ -561,7 +590,34 @@ function App() {
   const totalSend=calc.reduce((s,r)=>s+r.send,0);
   const critical=calc.filter(r=>r.demand>0&&r.lat<3).length;
   const updateRow=(idx,field,val)=>setRows(prev=>prev.map((r,i)=>i===idx?{...r,[field]:val}:r));
-  const reset=()=>{setRows(FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));setFillLog({inv:[],demand:[]});setInvByCity({BLR:{},KOL:{},DEL:{}});setDemandByCity({BLR:{},KOL:{},DEL:{}});};
+  const reset=()=>{
+    setRows(FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));
+    setFillLog({inv:[],demand:[]});
+    setInvByCity({BLR:{},KOL:{},DEL:{}});
+    setDemandByCity({BLR:{},KOL:{},DEL:{}});
+    setCity("BLR");
+    setTargetDays(12);
+    try { localStorage.removeItem("kilrr_state"); } catch(e) {}
+    window.history.replaceState(null,"",window.location.pathname);
+    showToast("Data cleared",K.t2);
+  };
+
+  const copyLink=()=>{
+    try {
+      const state = { city, targetDays, rows, invByCity, demandByCity, fillLog };
+      const encoded = btoa(JSON.stringify(state));
+      const url = window.location.origin + window.location.pathname + "#" + encoded;
+      navigator.clipboard.writeText(url).then(()=>{
+        showToast("🔗 Link copied! Share with your team",K.green);
+      }).catch(()=>{
+        // Fallback for non-https
+        const ta = document.createElement("textarea");
+        ta.value = url; document.body.appendChild(ta); ta.select();
+        document.execCommand("copy"); document.body.removeChild(ta);
+        showToast("🔗 Link copied! Share with your team",K.green);
+      });
+    } catch(e) { showToast("Could not copy link",K.red); }
+  };
 
   const exportCSV=()=>{
     const hdr=["Flavour","Full Name","Qty","Daily Demand",`After ${cityConf.transit}D Transit`,"Life After Transit","To Send","After Send","Est Life After Send"];
@@ -611,8 +667,9 @@ function App() {
             <input ref={soRef} type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleSO} style={{display:"none"}}/>
             {[
               {label:fillLog.inv.length?`✓ Inventory (${fillLog.inv.length})`:"⬆ Inventory",onClick:()=>invRef.current.click(),active:fillLog.inv.length>0,color:K.red},
-              {label:fillLog.demand.length?`✓ Sale Orders (${fillLog.demand.length})`:"⬆ Sale Orders",onClick:()=>soRef.current.click(),active:fillLog.demand.length>0,color:K.green},
+              {label:fillLog.demand.length?`✓ Sale Orders (${fillLog.demand.length})`:"⬆ Sale Orders (multi)",onClick:()=>soRef.current.click(),active:fillLog.demand.length>0,color:K.green},
               {label:"↓ Export CSV",onClick:exportCSV,active:false,color:K.t2},
+              {label:"🔗 Share",onClick:copyLink,active:false,color:"#2563EB"},
               {label:"Reset",onClick:reset,active:false,color:K.t2},
             ].map((b,i)=>(
               <button key={i} onClick={b.onClick} style={{padding:"8px 16px",borderRadius:6,cursor:"pointer",
