@@ -97,21 +97,90 @@ function parseDate(val) {
   return isNaN(d.getTime()) ? null : d;
 }
 
+
+// ── CSV parser: reads text directly, preserves all values as plain strings ──
+function parseCSVText(text) {
+  // Normalise line endings
+  var normalized = "";
+  for (var i = 0; i < text.length; i++) {
+    var code = text.charCodeAt(i);
+    if (code === 13) { // \r
+      normalized += "\n";
+      if (i + 1 < text.length && text.charCodeAt(i + 1) === 10) i++; // skip \n after \r
+    } else {
+      normalized += text[i];
+    }
+  }
+  // Parse into rows of cells
+  var rows = [];
+  var row = [];
+  var cell = "";
+  var inQuote = false;
+  for (var j = 0; j < normalized.length; j++) {
+    var ch = normalized[j];
+    if (inQuote) {
+      if (ch === '"' && normalized[j+1] === '"') { cell += '"'; j++; }
+      else if (ch === '"') { inQuote = false; }
+      else { cell += ch; }
+    } else if (ch === '"') {
+      inQuote = true;
+    } else if (ch === ',') {
+      row.push(cell); cell = "";
+    } else if (ch === "\n") {
+      row.push(cell); cell = "";
+      rows.push(row); row = [];
+    } else {
+      cell += ch;
+    }
+  }
+  // Handle last cell/row
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  if (rows.length === 0) return [];
+  // First row = headers (strip BOM from first header)
+  var headers = rows[0].map(function(h, i) {
+    var s = h.trim();
+    if (i === 0 && s.charCodeAt(0) === 0xFEFF) s = s.slice(1); // strip BOM
+    return s;
+  });
+  // Rest = data rows
+  var result = [];
+  for (var k = 1; k < rows.length; k++) {
+    var r = rows[k];
+    if (!r.some(function(c) { return c.trim(); })) continue; // skip blank rows
+    var obj = {};
+    headers.forEach(function(h, idx) {
+      obj[h] = r[idx] !== undefined ? r[idx] : "";
+    });
+    result.push(obj);
+  }
+  return result;
+}
+
+// ── File reader: CSV as text, Excel via XLSX ──
 function parseFile(file) {
-  return new Promise((res,rej)=>{
-    const r=new FileReader();
-    r.onload=ev=>{
-      try{
-        // raw:true preserves strings as-is (important for CSV date strings)
-        const wb=XLSX.read(ev.target.result,{type:"array"});
-        res(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:"",raw:true}));
-      }
-      catch(e){rej(e);}
-    };
-    r.onerror=rej;
-    r.readAsArrayBuffer(file);
+  return new Promise(function(res, rej) {
+    var isCSV = file.name.toLowerCase().endsWith(".csv");
+    var reader = new FileReader();
+    if (isCSV) {
+      reader.onload = function(ev) {
+        try { res(parseCSVText(ev.target.result)); } catch(e) { rej(e); }
+      };
+      reader.onerror = rej;
+      reader.readAsText(file, "utf-8");
+    } else {
+      reader.onload = function(ev) {
+        try {
+          var wb = XLSX.read(ev.target.result, {type:"array", cellDates:true});
+          var rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {defval:"", raw:false});
+          res(rows);
+        } catch(e) { rej(e); }
+      };
+      reader.onerror = rej;
+      reader.readAsArrayBuffer(file);
+    }
   });
 }
+
 
 function NumInput({value, onChange}) {
   const [focus,setFocus]=useState(false);
@@ -204,39 +273,53 @@ function ColumnMapper({title, headers, preview, fields, onConfirm, onClose}) {
   </Modal>;
 }
 
-function DemandPreview({results, dateRange, city, onConfirm, onClose}) {
-  const total=Object.values(results).reduce((s,r)=>s+r.total,0);
+function DemandPreview({byCityData, onConfirm, onClose}) {
+  const cityKeys=Object.keys(byCityData);
+  const [activeTab,setActiveTab]=React.useState(cityKeys[0]||"BLR");
+  const item=byCityData[activeTab]||{results:{},dateRange:""};
+  const cityColors={BLR:K.red,KOL:"#2563EB",DEL:"#059669"};
   return <Modal>
-    <SectionHead accent={K.green}>Demand Preview</SectionHead>
-    <div style={{display:"flex",gap:10,marginBottom:20,flexWrap:"wrap"}}>
-      {[{l:"City",v:CITIES[city]?.label||city},{l:"Period",v:dateRange},{l:"Orders",v:total.toLocaleString()}].map((s,i)=>(
-        <div key={i} style={{background:K.s2,border:`1px solid ${K.bdr}`,borderRadius:6,padding:"8px 14px",flex:1,minWidth:90}}>
-          <div style={{fontSize:9,color:K.t3,letterSpacing:.8,fontFamily:"'IBM Plex Mono',monospace",
-            marginBottom:3,textTransform:"uppercase",fontWeight:600}}>{s.l}</div>
-          <div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:13,color:K.ink}}>{s.v}</div>
-        </div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+      <div>
+        <div style={{fontFamily:"'Bebas Neue',cursive",fontSize:20,letterSpacing:2,marginBottom:4}}>DEMAND PREVIEW</div>
+        <div style={{fontSize:11,color:K.t3}}>Review before applying — {cityKeys.length} city/cities loaded</div>
+      </div>
+      <button onClick={onClose} style={{background:"none",border:"none",fontSize:18,cursor:"pointer",color:K.t3}}>✕</button>
+    </div>
+    <div style={{display:"flex",gap:6,marginBottom:16}}>
+      {cityKeys.map(c=>(
+        <button key={c} onClick={()=>setActiveTab(c)} style={{
+          padding:"7px 16px",borderRadius:6,border:`2px solid ${activeTab===c?(cityColors[c]||K.red):K.bdr}`,
+          background:activeTab===c?`${(cityColors[c]||K.red)}12`:"transparent",
+          color:activeTab===c?(cityColors[c]||K.red):K.t2,
+          fontFamily:"'IBM Plex Mono',monospace",fontSize:11,fontWeight:700,cursor:"pointer",transition:"all .15s"
+        }}>{c}</button>
       ))}
     </div>
-    <div style={{border:`1px solid ${K.bdr}`,borderRadius:8,overflow:"hidden",marginBottom:22,maxHeight:300,overflowY:"auto"}}>
+    <div style={{background:K.s2,borderRadius:8,padding:"10px 14px",marginBottom:14,
+      display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+      <div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,color:K.t2}}>
+        <span style={{color:K.t4}}>Invoice period: </span>{item.dateRange}
+      </div>
+      {item.files&&<span style={{fontSize:10,color:K.t3,maxWidth:280,textAlign:"right"}}>{item.files.join(", ")}</span>}
+    </div>
+    <div style={{overflowY:"auto",maxHeight:340,marginBottom:16}}>
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
         <thead>
-          <tr style={{background:K.s2,borderBottom:`2px solid ${K.bdr}`}}>
-            {["Flavour","Full Name","Sold","Days","Daily Demand"].map(h=>(
-              <th key={h} style={{padding:"9px 14px",textAlign:"left",fontSize:10,color:K.t2,
-                letterSpacing:.6,fontFamily:"'IBM Plex Mono',monospace",
-                textTransform:"uppercase",fontWeight:600}}>{h}</th>
+          <tr style={{borderBottom:`2px solid ${K.bdr}`}}>
+            {["Flavour","Full Name","Sold","Days","Daily"].map(h=>(
+              <th key={h} style={{padding:"8px 14px",textAlign:"left",color:K.t3,fontSize:10,
+                letterSpacing:.6,fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",fontWeight:600}}>{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {FLAVOUR_MAP.map((f,i)=>{
-            const r=results[f.short];
+            const r=item.results[f.short];
             return <tr key={i} style={{borderBottom:`1px solid ${K.bdr}`}}>
-              <td style={{padding:"8px 14px",fontFamily:"'Bebas Neue',cursive",
-                fontSize:15,letterSpacing:1,color:K.red}}>{f.short}</td>
+              <td style={{padding:"8px 14px",fontFamily:"'Bebas Neue',cursive",fontSize:15,letterSpacing:1,color:cityColors[activeTab]||K.red}}>{f.short}</td>
               <td style={{padding:"8px 14px",fontSize:11,color:K.t2}}>{f.full}</td>
-              <td style={{padding:"8px 14px",fontFamily:"'IBM Plex Mono',monospace",
-                fontWeight:600,color:r?K.ink:K.t4}}>{r?r.total:"—"}</td>
+              <td style={{padding:"8px 14px",fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:r?K.ink:K.t4}}>{r?r.total:"—"}</td>
               <td style={{padding:"8px 14px",fontFamily:"'IBM Plex Mono',monospace",color:K.t2}}>{r?r.days:"—"}</td>
               <td style={{padding:"8px 14px"}}>
                 {r?<span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:16,color:K.green}}>{r.daily}</span>
@@ -250,7 +333,7 @@ function DemandPreview({results, dateRange, city, onConfirm, onClose}) {
     <div style={{display:"flex",gap:10}}>
       <button onClick={onConfirm} style={{flex:1,padding:12,borderRadius:6,border:"none",
         background:K.green,color:"#fff",fontWeight:700,fontSize:13,
-        cursor:"pointer",fontFamily:"'IBM Plex Sans',sans-serif"}}>Fill into Calculator</button>
+        cursor:"pointer",fontFamily:"'IBM Plex Sans',sans-serif"}}>Apply All Cities to Calculator</button>
       <button onClick={onClose} style={{padding:"12px 20px",borderRadius:6,
         border:`2px solid ${K.bdr}`,background:"transparent",color:K.t2,
         fontSize:13,cursor:"pointer",fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600}}>Cancel</button>
@@ -259,27 +342,72 @@ function DemandPreview({results, dateRange, city, onConfirm, onClose}) {
 }
 
 function App() {
-  const [city,setCity]=useState("BLR");
-  const [targetDays,setTargetDays]=useState(12);
-  const [rows,setRows]=useState(()=>FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));
-  // Store inventory qty separately per city so switching city swaps the right qtys
-  const [invByCity,setInvByCity]=useState({BLR:{},KOL:{},DEL:{}});
+  // ── Load saved state: URL hash takes priority (shared link), then localStorage ──
+  const loadSaved = () => {
+    try {
+      // 1. Check URL hash first (shared link)
+      if (window.location.hash && window.location.hash.length > 1) {
+        const decoded = JSON.parse(atob(window.location.hash.slice(1)));
+        if (decoded && decoded.rows) return decoded;
+      }
+    } catch(e) {}
+    try {
+      // 2. Fall back to localStorage
+      const saved = localStorage.getItem("kilrr_state");
+      if (saved) {
+        const decoded = JSON.parse(saved);
+        if (decoded && decoded.rows) return decoded;
+      }
+    } catch(e) {}
+    return null;
+  };
+
+  const saved = loadSaved();
+  const [city,setCity]=useState(saved?.city || "BLR");
+  const [targetDays,setTargetDays]=useState(saved?.targetDays || 12);
+  const [rows,setRows]=useState(()=> saved?.rows || FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0,inTransit:0})));
+  const [invByCity,setInvByCity]=useState(saved?.invByCity || {BLR:{},KOL:{},DEL:{}});
+  const [demandByCity,setDemandByCity]=useState(saved?.demandByCity || {BLR:{},KOL:{},DEL:{}});
+  const [inTransitByCity,setInTransitByCity]=useState(saved?.inTransitByCity || {BLR:{},KOL:{},DEL:{}});
+  const [transitEtaByCity,setTransitEtaByCity]=useState(saved?.transitEtaByCity || {BLR:"",KOL:"",DEL:""});
   const [invMapper,setInvMapper]=useState(null);
   const [demandModal,setDemandModal]=useState(null);
   const [toast,setToast]=useState(null);
-  const [fillLog,setFillLog]=useState({inv:[],demand:[]});
+  const [fillLog,setFillLog]=useState(saved?.fillLog || {inv:[],demand:[]});
   const invRef=useRef(), soRef=useRef();
   const cityConf=CITIES[city];
 
-  // When city changes, swap in that city's inventory qtys (keep demand as-is)
+  // ── Auto-save to localStorage whenever key state changes ──
+  const { useEffect } = React;
+  useEffect(()=>{
+    try {
+      const state = { city, targetDays, rows, invByCity, demandByCity, inTransitByCity, transitEtaByCity, fillLog };
+      localStorage.setItem("kilrr_state", JSON.stringify(state));
+    } catch(e) {}
+  }, [city, targetDays, rows, invByCity, demandByCity, fillLog]);
+
+  // When city changes, swap in that city's inventory, demand, and inTransit
   const switchCity=useCallback((newCity)=>{
+    // Save current city's inTransit back to store before switching
+    setInTransitByCity(prev=>{
+      const cur={};
+      // We can't read rows here directly so we do it via functional update
+      return prev; // will be updated by the rows save below
+    });
     setCity(newCity);
-    setRows(prev=>prev.map(r=>({
-      ...r,
-      qty: invByCity[newCity][r.flavour] ?? 0,
-    })));
+    setRows(prev=>{
+      // Save current inTransit values for old city
+      const oldInTransit={};
+      prev.forEach(r=>{ oldInTransit[r.flavour]={qty:r.inTransit,eta:r.transitEta}; });
+      return prev.map(r=>({
+        ...r,
+        qty:         invByCity[newCity][r.flavour]    ?? 0,
+        demand:      demandByCity[newCity][r.flavour] ?? 0,
+        inTransit:   (inTransitByCity[newCity][r.flavour]?.qty)  ?? 0,
+      }));
+    });
     setFillLog(p=>({...p, inv: Object.keys(invByCity[newCity]).length ? Object.keys(invByCity[newCity]) : []}));
-  },[invByCity]);
+  },[invByCity, demandByCity, inTransitByCity]);
 
   const showToast=(msg,color=K.green)=>{setToast({msg,color});setTimeout(()=>setToast(null),3000);};
 
@@ -371,106 +499,71 @@ function App() {
     setFillLog(p=>({...p,inv:log}));setInvMapper(null);showToast(`Qty filled for ${log.length} flavours`,K.red);
   },[invMapper]);
 
+  // Process a single file: returns {city, results:{flavour:{total,days,daily}}, dateRange, fileName} or null
+  const processSingleSO=async (file)=>{
+    const data=await parseFile(file);
+    if(!data.length) return null;
+    const rawHeaders=Object.keys(data[0]);
+    const norm=h=>h.replace(/^\uFEFF/,"").trim();
+    const headers=rawHeaders.map(norm);
+    const cleanRows=data.map(row=>{
+      const out={};rawHeaders.forEach((rh,i)=>{out[headers[i]]=row[rh];});return out;
+    });
+    const skuCol    = headers.find(h=>h==="SKU Name")||headers.find(h=>/item.?type.?name/i.test(h))||headers.find(h=>/sku.?name/i.test(h));
+    const dateCol   = headers.find(h=>h==="Invoice Created")||headers.find(h=>/invoice.?creat/i.test(h));
+    const facCol    = headers.find(h=>/^facility$/i.test(h));
+    const statusCol = headers.find(h=>/sale.?order.?item.?status/i.test(h));
+    if(!skuCol||!dateCol) return null;
+    const FMAP={"erbangalore":"BLR","erbanglore":"BLR","erkolkata":"KOL","erdelhi":"DEL"};
+    let detectedCity=null;
+    if(facCol){for(const row of cleanRows){const fac=String(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");if(FMAP[fac]){detectedCity=FMAP[fac];break;}}}
+    const targetCity=detectedCity||city;
+    const cityFacBase={BLR:"erbangalore",KOL:"erkolkata",DEL:"erdelhi"}[targetCity];
+    const counts={};const allDates=new Set();
+    for(const row of cleanRows){
+      if(statusCol&&String(row[statusCol]||"").toUpperCase()==="CANCELLED") continue;
+      if(facCol){const fac=String(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");if(fac!==cityFacBase) continue;}
+      const short=matchFlavour(row[skuCol]);if(!short) continue;
+      counts[short]=(counts[short]||0)+1;
+      const s=String(row[dateCol]||"").trim();
+      const isoM=s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      const dmyM=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      let dk=null;
+      if(isoM) dk=isoM[1]+"-"+isoM[2]+"-"+isoM[3];
+      else if(dmyM) dk=dmyM[3]+"-"+dmyM[2].padStart(2,"0")+"-"+dmyM[1].padStart(2,"0");
+      if(dk) allDates.add(dk);
+    }
+    if(!Object.keys(counts).length||!allDates.size) return null;
+    const sorted=[...allDates].sort();
+    const msPerDay=1000*60*60*24;
+    const numDays=Math.round((new Date(sorted[sorted.length-1])-new Date(sorted[0]))/msPerDay)+1;
+    const results={};
+    for(const[short,total] of Object.entries(counts)) results[short]={total,days:numDays,daily:Math.ceil(total/numDays)};
+    return{city:targetCity,results,dateRange:`${sorted[0]} → ${sorted[sorted.length-1]} (${numDays} days)`,fileName:file.name};
+  };
+
   const handleSO=useCallback(async e=>{
-    const file=e.target.files?.[0]; if(!file) return;
+    const files=Array.from(e.target.files||[]);
+    if(!files.length) return;
     try{
-      const data=await parseFile(file);
-      if(!data.length) return showToast("File is empty",K.red);
-
-      // Normalise headers (strip BOM/whitespace)
-      const rawHeaders=Object.keys(data[0]);
-      const norm=h=>h.replace(/^﻿/,"").trim();
-      const headers=rawHeaders.map(norm);
-      const cleanRows=data.map(row=>{
-        const out={};
-        rawHeaders.forEach((rh,i)=>{out[headers[i]]=row[rh];});
-        return out;
-      });
-
-      // Known Unicommerce column names (with fallbacks)
-      const skuCol    = headers.find(h=>h==="SKU Name")
-                     || headers.find(h=>/item.?type.?name/i.test(h))
-                     || headers.find(h=>/sku.?name/i.test(h));
-      const dateCol   = headers.find(h=>/order date/i.test(h));
-      const facCol    = headers.find(h=>/^facility$/i.test(h));
-      const statusCol = headers.find(h=>/sale.?order.?item.?status/i.test(h));
-
-      if(!skuCol)  return showToast("Cannot find SKU Name column",K.red);
-      if(!dateCol) return showToast("Cannot find Order Date column",K.red);
-
-      // Detect city from Facility column
-      const FMAP={
-        "erbangalore":"BLR","erbanglore":"BLR",
-        "erkolkata":"KOL",
-        "erdelhi":"DEL",
-      };
-      let detectedCity=null;
-      if(facCol){
-        for(const row of cleanRows){
-          const fac=(String(row[facCol]||"")).toLowerCase().replace(/[^a-z]/g,"");
-          if(FMAP[fac]){detectedCity=FMAP[fac];break;}
+      const parsed=await Promise.all(files.map(processSingleSO));
+      const valid=parsed.filter(Boolean);
+      if(!valid.length) return showToast("No usable order data found",K.red);
+      // Merge by city (multiple files for same city get summed)
+      const byCity={};
+      for(const item of valid){
+        const c=item.city;
+        if(!byCity[c]){byCity[c]={city:c,dateRange:item.dateRange,results:{},files:[]};}
+        byCity[c].files.push(item.fileName);
+        // Merge results
+        for(const[short,r] of Object.entries(item.results)){
+          if(!byCity[c].results[short]) byCity[c].results[short]={total:0,days:r.days,daily:0};
+          byCity[c].results[short].total+=r.total;
+          byCity[c].results[short].days=r.days;
+          byCity[c].results[short].daily=Math.ceil(byCity[c].results[short].total/r.days);
         }
       }
-      const targetCity=detectedCity||city;
-      const cityFacBase={BLR:"erbangalore",KOL:"erkolkata",DEL:"erdelhi"}[targetCity];
-
-      // Count SKUs + collect dates, filtered to this city only
-      const counts={};
-      const allDates=new Set();
-
-      for(const row of cleanRows){
-        // Skip cancelled
-        if(statusCol && String(row[statusCol]||"").toUpperCase()==="CANCELLED") continue;
-        // Filter to this city's facility only
-        if(facCol){
-          const fac=String(row[facCol]||"").toLowerCase().replace(/[^a-z]/g,"");
-          if(fac!==cityFacBase) continue;
-        }
-        // Match SKU
-        const short=matchFlavour(row[skuCol]);
-        if(!short) continue;
-        counts[short]=(counts[short]||0)+1;
-        // XLSX.js auto-converts date strings to JS Date objects — handle all cases
-        const rawDateVal=row[dateCol];
-        let dateKey=null;
-        if(rawDateVal instanceof Date){
-          // JS Date object — use UTC date directly
-          if(!isNaN(rawDateVal.getTime()))
-            dateKey=rawDateVal.toISOString().slice(0,10);
-        } else if(typeof rawDateVal==="number"){
-          // Excel serial number — convert to date
-          const d=new Date(Math.round((rawDateVal-25569)*86400*1000));
-          dateKey=d.toISOString().slice(0,10);
-        } else {
-          // String — handle "YYYY-MM-DD ..." and "DD/MM/YYYY ..."
-          const s=String(rawDateVal||"").trim();
-          const isoM=s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-          const dmyM=s.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
-          if(isoM)      dateKey=`${isoM[1]}-${isoM[2]}-${isoM[3]}`;
-          else if(dmyM) dateKey=`${dmyM[3]}-${dmyM[2]}-${dmyM[1]}`;
-        }
-        if(dateKey) allDates.add(dateKey);
-      }
-
-      if(!Object.keys(counts).length)
-        return showToast("No orders found for "+CITIES[targetCity].label,K.red);
-      if(!allDates.size)
-        return showToast("Orders found but dates could not be read",K.red);
-
-      // Date range: first → last calendar day (inclusive)
-      const sorted=[...allDates].sort();
-      const msPerDay=1000*60*60*24;
-      const numDays=Math.round((new Date(sorted[sorted.length-1])-new Date(sorted[0]))/msPerDay)+1;
-
-      const results={};
-      for(const[short,total] of Object.entries(counts))
-        results[short]={total,days:numDays,daily:Math.ceil(total/numDays)};
-
-      setDemandModal({
-        results,
-        dateRange:`${sorted[0]}  →  ${sorted[sorted.length-1]}  (${numDays} days)`,
-        city:targetCity,
-      });
+      setDemandModal({byCityData:byCity});
     }catch(err){
       console.error("SO parse error:",err);
       showToast("Error: "+err.message,K.red);
@@ -479,30 +572,195 @@ function App() {
   },[city]);
 
   const applyDemand=useCallback(()=>{
-    const{results,city:dc}=demandModal;const log=[];
-    setRows(prev=>prev.map(r=>{const res=results[r.flavour];if(!res)return r;log.push(r.flavour);return{...r,demand:res.daily};}));
-    setFillLog(p=>({...p,demand:log}));if(dc&&dc!==city)setCity(dc);
-    setDemandModal(null);showToast(`Demand filled for ${log.length} flavours`,K.green);
+    const{byCityData}=demandModal;
+    // Build new demandByCity
+    const newDBC={BLR:{},KOL:{},DEL:{}};
+    const citiesLoaded=[];
+    for(const[c,item] of Object.entries(byCityData)){
+      const d={};
+      for(const[short,r] of Object.entries(item.results)){d[short]=r.daily;}
+      newDBC[c]=d;
+      citiesLoaded.push(c);
+    }
+    setDemandByCity(newDBC);
+    // Apply current city demand to rows immediately
+    const currDemand=newDBC[city]||{};
+    setRows(prev=>prev.map(r=>({...r,demand:currDemand[r.flavour]??r.demand})));
+    setFillLog(p=>({...p,demand:Object.keys(currDemand)}));
+    setDemandModal(null);
+    showToast("Demand loaded for "+citiesLoaded.join(", "),K.green);
   },[demandModal,city]);
+
+  // Days from today to a YYYY-MM-DD date string (negative = past)
+  const daysFromToday=(dateStr)=>{
+    if(!dateStr) return null;
+    const today=new Date(); today.setHours(0,0,0,0);
+    const eta=new Date(dateStr); eta.setHours(0,0,0,0);
+    return Math.round((eta-today)/(1000*60*60*24));
+  };
+
+  const transitEta=transitEtaByCity[city]||"";
+  const etaDays=daysFromToday(transitEta); // null if no ETA set
+  // etaWithinWindow: ETA arrives on or before new dispatch would arrive
+  const etaWithinWindow = etaDays===null ? true : etaDays <= cityConf.transit;
+  // daysLate: how many days after the transit window the ETA falls
+  const etaDaysLate = (!etaWithinWindow && etaDays!==null) ? etaDays - cityConf.transit : 0;
 
   const calc=useMemo(()=>rows.map(r=>{
     const sat=r.qty-r.demand*cityConf.transit;
     const lat=r.demand>0?sat/r.demand:0;
-    const need=targetDays*r.demand-sat;
+    const inT=r.inTransit||0;
+    // Only deduct in-transit stock from needed if ETA is within the transit window
+    const inTEffective = etaWithinWindow ? inT : 0;
+    const need=targetDays*r.demand-sat-inTEffective;
     const send=r.demand===0?0:Math.max(0,ceil50(need));
-    const sas=sat+send;
+    // After-send stock includes in-transit regardless (it will arrive eventually)
+    const sas=sat+send+inT;
     const las=r.demand>0?sas/r.demand:0;
-    return{...r,sat,lat,send,sas,las};
-  }),[rows,cityConf,targetDays]);
+    return{...r,sat,lat,send,sas,las,inT,inTEffective};
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }),[rows,cityConf,targetDays,etaWithinWindow]);
 
   const totalSend=calc.reduce((s,r)=>s+r.send,0);
   const critical=calc.filter(r=>r.demand>0&&r.lat<3).length;
-  const updateRow=(idx,field,val)=>setRows(prev=>prev.map((r,i)=>i===idx?{...r,[field]:val}:r));
-  const reset=()=>{setRows(FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));setFillLog({inv:[],demand:[]});setInvByCity({BLR:{},KOL:{},DEL:{}});};
+  const updateRow=(idx,field,val)=>{
+    setRows(prev=>{
+      const next=prev.map((r,i)=>i===idx?{...r,[field]:val}:r);
+      if(field==="inTransit"){
+        setInTransitByCity(p=>({
+          ...p,
+          [city]:{
+            ...p[city],
+            [prev[idx].flavour]:{ qty:val, eta:transitEtaByCity[city]||"" }
+          }
+        }));
+      }
+      return next;
+    });
+  };
+  const setTransitEta=(eta)=>{
+    setTransitEtaByCity(p=>({...p,[city]:eta}));
+  };
+  const reset=()=>{
+    setRows(FLAVOUR_MAP.map(f=>({flavour:f.short,qty:0,demand:0})));
+    setFillLog({inv:[],demand:[]});
+    setInvByCity({BLR:{},KOL:{},DEL:{}});
+    setDemandByCity({BLR:{},KOL:{},DEL:{}});
+    setInTransitByCity({BLR:{},KOL:{},DEL:{}});
+    setTransitEtaByCity({BLR:"",KOL:"",DEL:""});
+    setCity("BLR");
+    setTargetDays(12);
+    try { localStorage.removeItem("kilrr_state"); } catch(e) {}
+    window.history.replaceState(null,"",window.location.pathname);
+    showToast("Data cleared",K.t2);
+  };
+
+  const copyLink=()=>{
+    try {
+      const state = { city, targetDays, rows, invByCity, demandByCity, inTransitByCity, transitEtaByCity, fillLog };
+      const encoded = btoa(JSON.stringify(state));
+      const url = window.location.origin + window.location.pathname + "#" + encoded;
+      navigator.clipboard.writeText(url).then(()=>{
+        showToast("🔗 Link copied! Share with your team",K.green);
+      }).catch(()=>{
+        // Fallback for non-https
+        const ta = document.createElement("textarea");
+        ta.value = url; document.body.appendChild(ta); ta.select();
+        document.execCommand("copy"); document.body.removeChild(ta);
+        showToast("🔗 Link copied! Share with your team",K.green);
+      });
+    } catch(e) { showToast("Could not copy link",K.red); }
+  };
+
+  // ── Fetch from Unicommerce API ──────────────────────────────────────────────
+  const [ucLoading, setUcLoading] = useState(false);
+
+  const fetchFromUC = async () => {
+    setUcLoading(true);
+    try {
+      // Step 1: Check auth
+      const ping = await fetch("/api/ping");
+      if (!ping.ok) throw new Error("Could not reach Unicommerce. Is the server running?");
+
+      // Step 2: Fetch inventory
+      showToast("Fetching inventory...", "#7C3AED");
+      const invRes = await fetch("/api/inventory");
+      const invJson = await invRes.json();
+      if (!invJson.success) throw new Error("Inventory fetch failed: " + invJson.error);
+
+      // Step 3: Fetch orders (last 7 days)
+      showToast("Fetching orders...", "#7C3AED");
+      const ordRes = await fetch("/api/orders?days=7");
+      const ordJson = await ordRes.json();
+      if (!ordJson.success) throw new Error("Orders fetch failed: " + ordJson.error);
+
+      // ── Process inventory ──────────────────────────────────────────────────
+      const newInvByCity = { BLR:{}, KOL:{}, DEL:{} };
+      for (const [cityKey, skus] of Object.entries(invJson.data)) {
+        for (const s of skus) {
+          const short = matchFlavour(s.name || s.sku);
+          if (short) newInvByCity[cityKey][short] = (newInvByCity[cityKey][short]||0) + s.quantity;
+        }
+      }
+
+      // ── Process orders ─────────────────────────────────────────────────────
+      // Each city returns {items:[{itemTypeSKU, saleOrderItemStatus, ...}], fromDate, toDate, days}
+      const newDemandByCity = { BLR:{}, KOL:{}, DEL:{} };
+      const newDemandDetail = {};
+
+      for (const [cityKey, cityData] of Object.entries(ordJson.data)) {
+        const counts = {};
+        const SKIP = ["CANCELLED"];
+        for (const item of cityData.items) {
+          const status = (item.saleOrderItemStatus || item.status || "").toUpperCase();
+          if (SKIP.includes(status)) continue;
+          // SKU name can be in itemTypeSKU or itemTypeName
+          const skuName = item.itemTypeName || item.itemTypeSKU || item.sku || "";
+          const short = matchFlavour(skuName);
+          if (!short) continue;
+          counts[short] = (counts[short]||0) + 1;
+        }
+        const numDays = cityData.days || 7;
+        for (const [short, total] of Object.entries(counts)) {
+          newDemandByCity[cityKey][short] = Math.ceil(total / numDays);
+        }
+        newDemandDetail[cityKey] = {
+          fromDate: cityData.fromDate,
+          toDate: cityData.toDate,
+          days: numDays,
+          counts,
+        };
+      }
+
+      // ── Apply to state ─────────────────────────────────────────────────────
+      setInvByCity(newInvByCity);
+      setDemandByCity(newDemandByCity);
+
+      // Immediately apply current city
+      const currInv    = newInvByCity[city]    || {};
+      const currDemand = newDemandByCity[city] || {};
+      setRows(prev => prev.map(r => ({
+        ...r,
+        qty:    currInv[r.flavour]    ?? 0,
+        demand: currDemand[r.flavour] ?? 0,
+      })));
+
+      const invCount    = Object.values(newInvByCity).reduce((s,c)=>s+Object.keys(c).length,0);
+      const demandCount = Object.values(newDemandByCity).reduce((s,c)=>s+Object.keys(c).length,0);
+      setFillLog({ inv: Object.keys(currInv), demand: Object.keys(currDemand) });
+      showToast(`✓ Synced from Unicommerce — ${invCount} inv, ${demandCount} demand`, K.green);
+
+    } catch (err) {
+      console.error("UC fetch error:", err);
+      showToast("Error: " + err.message, K.red);
+    } finally {
+      setUcLoading(false);
+    }
+  };
 
   const exportCSV=()=>{
-    const hdr=["Flavour","Full Name","Qty","Daily Demand",`After ${cityConf.transit}D Transit`,"Life After Transit","To Send","After Send","Est Life After Send"];
-    const body=calc.map(r=>{const fm=FLAVOUR_MAP.find(f=>f.short===r.flavour);return[r.flavour,fm?.full,r.qty,r.demand,r.demand>0?r.sat.toFixed(0):"",r.demand>0?r.lat.toFixed(1)+"d":"",r.demand>0?r.send:"",r.demand>0?r.sas.toFixed(0):"",r.demand>0?r.las.toFixed(1)+"d":""];});
+    const hdr=["Flavour","Full Name","Qty","Daily Demand","In Transit","ETA",`After ${cityConf.transit}D Transit`,"Life After Transit","To Send","After Send","Est Life After Send"];
+    const body=calc.map(r=>{const fm=FLAVOUR_MAP.find(f=>f.short===r.flavour);return[r.flavour,fm?.full,r.qty,r.demand,r.inTransit||0,r.transitEta||"",r.demand>0?r.sat.toFixed(0):"",r.demand>0?r.lat.toFixed(1)+"d":"",r.demand>0?r.send:"",r.demand>0?r.sas.toFixed(0):"",r.demand>0?r.las.toFixed(1)+"d":""];});
     const csv=[hdr,...body].map(r=>r.join(",")).join("\n");
     const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);
     a.download=`kilrr-stock-${city}-${new Date().toISOString().slice(0,10)}.csv`;a.click();
@@ -526,8 +784,7 @@ function App() {
           {key:"qty",label:"Qty In-Hand Column",detect:["qty","quantity","available","inventory","stock"]},
         ]} onConfirm={applyInv} onClose={()=>setInvMapper(null)}/>}
 
-      {demandModal&&<DemandPreview results={demandModal.results} dateRange={demandModal.dateRange}
-        city={demandModal.city} onConfirm={applyDemand} onClose={()=>setDemandModal(null)}/>}
+      {demandModal&&<DemandPreview byCityData={demandModal.byCityData} onConfirm={applyDemand} onClose={()=>setDemandModal(null)}/>}
 
       {/* HEADER */}
       <div style={{background:K.s1,borderBottom:`2px solid ${K.bdr}`,padding:"0 32px",
@@ -546,11 +803,13 @@ function App() {
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center"}}>
             <input ref={invRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleInv} style={{display:"none"}}/>
-            <input ref={soRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleSO} style={{display:"none"}}/>
+            <input ref={soRef} type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleSO} style={{display:"none"}}/>
             {[
+              {label:ucLoading?"⏳ Syncing...":"⚡ Fetch from UC",onClick:fetchFromUC,active:!ucLoading,color:"#7C3AED"},
               {label:fillLog.inv.length?`✓ Inventory (${fillLog.inv.length})`:"⬆ Inventory",onClick:()=>invRef.current.click(),active:fillLog.inv.length>0,color:K.red},
-              {label:fillLog.demand.length?`✓ Sale Orders (${fillLog.demand.length})`:"⬆ Sale Orders",onClick:()=>soRef.current.click(),active:fillLog.demand.length>0,color:K.green},
+              {label:fillLog.demand.length?`✓ Sale Orders (${fillLog.demand.length})`:"⬆ Sale Orders (multi)",onClick:()=>soRef.current.click(),active:fillLog.demand.length>0,color:K.green},
               {label:"↓ Export CSV",onClick:exportCSV,active:false,color:K.t2},
+              {label:"🔗 Share",onClick:copyLink,active:false,color:"#2563EB"},
               {label:"Reset",onClick:reset,active:false,color:K.t2},
             ].map((b,i)=>(
               <button key={i} onClick={b.onClick} style={{padding:"8px 16px",borderRadius:6,cursor:"pointer",
@@ -570,8 +829,8 @@ function App() {
         {(!fillLog.inv.length||!fillLog.demand.length)&&(
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:22}}>
             {[
-              {n:"01",label:"Upload Inventory Report",sub:"Unicommerce → Reports → Inventory Snapshot",done:fillLog.inv.length>0,color:K.red,count:fillLog.inv.length,fn:()=>invRef.current.click()},
-              {n:"02",label:"Upload Sale Orders",sub:"Unicommerce → Reports → Sale Orders",done:fillLog.demand.length>0,color:K.green,count:fillLog.demand.length,fn:()=>soRef.current.click()},
+              {n:"01",label:"Upload Inventory Report",sub:"⚡ Use Fetch from UC button above, or upload CSV below",done:fillLog.inv.length>0,color:K.red,count:fillLog.inv.length,fn:()=>invRef.current.click()},
+              {n:"02",label:"Upload Sale Orders",sub:"⚡ Use Fetch from UC button above, or upload CSVs below",done:fillLog.demand.length>0,color:K.green,count:fillLog.demand.length,fn:()=>soRef.current.click()},
             ].map(s=>(
               <div key={s.n} onClick={s.done?undefined:s.fn}
                 style={{background:K.s1,borderRadius:10,padding:"18px 22px",
@@ -599,7 +858,7 @@ function App() {
         )}
 
         {/* CONTROLS */}
-        <div style={{display:"grid",gridTemplateColumns:"auto auto 1fr",gap:14,marginBottom:22,alignItems:"stretch"}}>
+        <div style={{display:"grid",gridTemplateColumns:"auto auto auto 1fr",gap:14,marginBottom:22,alignItems:"stretch"}}>
           <div style={{background:K.s1,border:`2px solid ${K.bdr}`,borderRadius:10,padding:"16px 20px"}}>
             <div style={{fontSize:10,color:K.t3,letterSpacing:.8,marginBottom:12,
               fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",fontWeight:600}}>City</div>
@@ -627,6 +886,31 @@ function App() {
                 {targetDays}<span style={{fontSize:16,color:K.t3}}>d</span>
               </span>
             </div>
+          </div>
+
+          <div style={{background:K.s1,border:`2px solid ${"#7C3AED"}`,borderRadius:10,padding:"16px 20px",minWidth:200}}>
+            <div style={{fontSize:10,color:K.t3,letterSpacing:.8,marginBottom:12,
+              fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",fontWeight:600}}>In Transit ETA</div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <input type="date" value={transitEtaByCity[city]||""}
+                onChange={e=>setTransitEta(e.target.value)}
+                style={{flex:1,padding:"8px 10px",borderRadius:6,
+                  border:`2px solid ${transitEtaByCity[city]?"#7C3AED":"#D1C9C0"}`,
+                  background:transitEtaByCity[city]?"#7C3AED0A":K.s2,
+                  color:transitEtaByCity[city]?"#7C3AED":K.t3,
+                  fontFamily:"'IBM Plex Mono',monospace",fontSize:12,
+                  fontWeight:600,outline:"none",cursor:"pointer"}}/>
+              {transitEtaByCity[city]&&<button onClick={()=>setTransitEta("")}
+                style={{background:"none",border:"none",cursor:"pointer",color:K.t3,fontSize:14,padding:"2px 4px"}}>✕</button>}
+            </div>
+            {transitEtaByCity[city]&&<div style={{marginTop:6}}>
+              <div style={{fontSize:10,fontFamily:"'IBM Plex Mono',monospace",
+                color:etaWithinWindow?"#059669":"#D97706",fontWeight:700}}>
+                {etaWithinWindow
+                  ? `✓ Within ${cityConf.transit}D window — counts against dispatch`
+                  : `⚠ ${etaDaysLate}d beyond ${cityConf.transit}D window — won't reduce To Send`}
+              </div>
+            </div>}
           </div>
 
           <div style={{background:K.s1,border:`2px solid ${K.bdr}`,borderLeft:`4px solid ${K.red}`,
@@ -678,6 +962,7 @@ function App() {
                     {h:`After ${cityConf.transit}D Transit`},
                     {h:"Life"},
                     {h:"To Send",c:K.amber},
+                    {h:"In Transit",c:"#7C3AED",sub:"qty · ETA check"},
                     {h:"After Send"},
                     {h:"Est Life"},
                     {h:"Status"},
@@ -723,6 +1008,20 @@ function App() {
                     <td style={{padding:"6px 10px",minWidth:100}}>
                       <NumInput value={row.demand} onChange={v=>updateRow(idx,"demand",v)}/>
                     </td>
+                    <td style={{padding:"6px 8px",minWidth:100}}>
+                      <NumInput value={row.inTransit||0} onChange={v=>updateRow(idx,"inTransit",v)}/>
+                      {(row.inTransit||0)>0 && transitEta && (
+                        <div style={{marginTop:3,fontSize:9,fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,
+                          color:etaWithinWindow?"#059669":"#D97706",letterSpacing:.3}}>
+                          {etaWithinWindow
+                            ? `✓ counts (${etaDays}d)`
+                            : `⚠ +${etaDaysLate}d late`}
+                        </div>
+                      )}
+                      {(row.inTransit||0)>0 && !transitEta && (
+                        <div style={{marginTop:3,fontSize:9,color:K.t4,fontFamily:"'IBM Plex Mono',monospace"}}>no ETA</div>
+                      )}
+                    </td>
                     <td style={{padding:"10px 14px"}}>
                       <span style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,fontSize:13,
                         color:row.demand>0?(row.sat<0?K.red:K.ink):K.t4}}>
@@ -761,7 +1060,7 @@ function App() {
               </tbody>
               <tfoot>
                 <tr style={{borderTop:`2px solid ${K.bdrD}`,background:K.s2}}>
-                  <td colSpan={7} style={{padding:"13px 14px",fontSize:11,color:K.t2,
+                  <td colSpan={8} style={{padding:"13px 14px",fontSize:11,color:K.t2,
                     letterSpacing:.6,fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,textTransform:"uppercase"}}>
                     Total Dispatch
                   </td>
