@@ -1,7 +1,6 @@
 {
   "name": "kilrr-stock-calculator",
   "version": "1.0.0",
-  "description": "KILRR ER Stock Calculator with Unicommerce API integration",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
